@@ -301,6 +301,17 @@ PYEOF
     echo "ksud_integration.c: 已补回缺失的静态键声明"
   fi
 
+  # 0j) 新版 FinaSU（v1.0.7+）的 dispatch.c / setuid_hook.c 仍调用
+  #     hook/tp_marker.c 的函数（任务标记），而 10_enable 补丁将
+  #     hook/tp_marker.o 移出编译 → 链接时未定义。
+  #     tp_marker.c 不依赖被移除的模块，按需恢复其编译。
+  if ! grep -q 'hook/tp_marker.o' "$FINASU_KSU/Kbuild" \
+    && grep -qE 'ksu_(mark_all_process|unmark_all_process|mark_running_process|get_task_mark|set_task_mark|clear_task_tracepoint_flag_if_needed)\(' \
+         "$FINASU_KSU/supercall/dispatch.c" "$FINASU_KSU/hook/setuid_hook.c" 2>/dev/null; then
+    sed -i 's|^kernelsu-objs += hook/setuid_hook.o$|&\nkernelsu-objs += hook/tp_marker.o|' "$FINASU_KSU/Kbuild"
+    echo "Kbuild: 已恢复 hook/tp_marker.o（新版 FinaSU 仍引用 tp_marker 符号）"
+  fi
+
   # 1) 移除已不参与编译的模块的调用（仅剩 syscall hook / syscall hook manager）
   sed -i \
     -e '/^[[:space:]]*ksu_syscall_hook_init();$/d' \
