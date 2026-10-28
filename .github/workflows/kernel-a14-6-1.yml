@@ -225,7 +225,7 @@ jobs:
             os_patch_level: "2026-09"
           - sub_level: "X"
             os_patch_level: "lts"
-            display_sub: "177"
+            display_sub: "180"
     uses: ./.github/workflows/build.yml
     secrets: inherit
     with:
