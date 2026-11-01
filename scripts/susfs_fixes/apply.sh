@@ -44,12 +44,24 @@ verify_finasu_native_susfs() {
       || { echo "::error::FinaSU Kconfig 缺少 config $OPT（上游结构可能已变化）" >&2; exit 1; }
   done
 
-  # extension/susfs.c 提供 50_add 主补丁在 fs/exec.c 内联调用的全部入口点，缺失会在
-  # vmlinux 链接阶段报 undefined symbol，这里提前校验
+  # 50_add 主补丁在 fs/exec.c 内联调用的入口点，缺失会在 vmlinux 链接阶段报
+  # undefined symbol，这里提前校验。入口点会随上游重构在 extension/susfs.c 与
+  # preinit/preinit.c 之间迁移（FinaSU adf9a1861「kernel: Add selectable SUSFS
+  # Inline hook backend」把 ksu_setup_preinit_file / ksu_preinit_handle_post_execveat
+  # 从 extension/susfs.c 移到了 preinit/preinit.c），因此按候选文件列表查找，
+  # 只要求「在任一候选文件中定义」，避免上游再次挪位置就误报。
   for SYM in ksu_handle_execveat ksu_handle_execveat_sucompat ksu_handle_post_execveat_sucompat \
              ksu_setup_preinit_file ksu_preinit_handle_post_execveat; do
-    grep -qE "^(int|void) $SYM\(" "$FINASU_KSU/extension/susfs.c" \
-      || { echo "::error::FinaSU extension/susfs.c 缺少全局入口点: $SYM" >&2; exit 1; }
+    FOUND_IN=""
+    for CAND in extension/susfs.c preinit/preinit.c extension/preinit.c preinit.c; do
+      if [ -f "$FINASU_KSU/$CAND" ] \
+        && grep -qE "^(int|void) $SYM\(" "$FINASU_KSU/$CAND"; then
+        FOUND_IN="$CAND"
+        break
+      fi
+    done
+    [ -n "$FOUND_IN" ] \
+      || { echo "::error::FinaSU 未定义 SUSFS 内联入口点: $SYM（extension/susfs.c 与 preinit/preinit.c 均未找到）" >&2; exit 1; }
   done
 
   # 三参数 SUSFS 实现（内核侧 kernel/sys.c 的 3 参调用依赖该签名）
