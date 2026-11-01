@@ -1531,6 +1531,20 @@ jobs:
             fi
           fi
 
+          # FinaSU + SUSFS：选择 SUSFS Inline hook 后端；匹配的 50_add 补丁
+          # 提供直接 ksu_handle_* 调用点，FinaSU Kbuild 会在编译期校验。
+          # 若当前内核/补丁缺少 hook 点，回退 Tracepoint，避免编译失败。
+          if [ "${{ inputs.ksu_variant }}" == "FinaSU" ] && [ "${{ inputs.enable_susfs }}" == "true" ]; then
+            chmod +x KernelSU/kernel/tools/check_susfs_inline.sh 2>/dev/null || true
+            if grep -q '^config KSU_HOOK_SUSFS_INLINE' KernelSU/kernel/Kconfig 2>/dev/null \
+              && bash KernelSU/kernel/tools/check_susfs_inline.sh common >/dev/null 2>&1; then
+              echo "CONFIG_KSU_HOOK_SUSFS_INLINE=y" >> "$DEFCONFIG"
+              echo "FinaSU: 已选择 SUSFS Inline hook 后端"
+            else
+              echo "::warning title=SUSFS Inline 回退::当前内核缺少内联 hook 调用点，回退到 Tracepoint 后端"
+            fi
+          fi
+
           CURRENT_SUB="${{ inputs.sub_level }}"
           if [[ ! "$CURRENT_SUB" =~ ^[0-9]+$ ]]; then
             CURRENT_SUB=99999
