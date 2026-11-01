@@ -14,12 +14,20 @@ on:
         options:
           - FinaSU
         default: FinaSU
+      build_channel:
+        description: "构建通道（正式=官方 Release 发行版，最新=上游最新提交）"
+        required: false
+        type: choice
+        options:
+          - "正式 (Release)"
+          - "最新 (HEAD)"
+        default: "正式 (Release)"
       version:
         description: "自定义版本名 (可选)"
         required: false
         type: string
       build_time:
-        description: "自定义构建时间 (留空=自动获取当前北京时间) (示例 Sun Dec  1 08:10:00 UTC 2026)"
+        description: "自定义构建时间 (留空=自动获取当前北京时间) (示例 Tue Dec  1 08:10:00 UTC 2026)"
         required: false
         type: string
         default: ""
@@ -66,7 +74,7 @@ on:
         type: boolean
         default: false
       use_net_enhance:
-        description: "启用 网络增强 (IPSet + BBR)"
+        description: "启用 网络增强 (BBRv3 + IPSet + Qdisc + CIFS)"
         required: true
         type: boolean
         default: false
@@ -100,6 +108,11 @@ on:
       kernelsu_variant:
         required: true
         type: string
+      build_channel:
+        description: "构建通道（从 main.yml 传入；直接触发时取本工作流拉取的管理器来源）"
+        required: false
+        type: string
+        default: "正式 (Release)"
       version:
         required: false
         type: string
@@ -227,6 +240,7 @@ jobs:
       display_sub: ${{ matrix.display_sub || '' }}
       os_patch_level: ${{ matrix.os_patch_level }}
       ksu_variant: ${{ inputs.kernelsu_variant }}
+      build_channel: ${{ inputs.build_channel }}
       ksu_commit: ${{ inputs.ksu_commit || needs.get-ksu-manager.outputs.ksuCommit }}
       ksu_cert_size: ${{ inputs.ksu_cert_size || needs.get-ksu-manager.outputs.managerCertSize }}
       ksu_cert_hash: ${{ inputs.ksu_cert_hash || needs.get-ksu-manager.outputs.managerCertHash }}
@@ -252,3 +266,4 @@ jobs:
     secrets: inherit
     with:
       kernelsu_variant: ${{ inputs.kernelsu_variant }}
+      build_channel: ${{ inputs.build_channel }}

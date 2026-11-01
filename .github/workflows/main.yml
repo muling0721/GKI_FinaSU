@@ -40,6 +40,14 @@ on:
           - FinaSU
         default: FinaSU
 
+      build_channel:
+        description: "构建通道（正式=官方 Release 发行版，最新=上游最新提交）"
+        type: choice
+        options:
+          - "正式 (Release)"
+          - "最新 (HEAD)"
+        default: "正式 (Release)"
+
       # ==================== 可选配置 ====================
       version:
         description: "自定义版本名 (可选)"
@@ -47,7 +55,7 @@ on:
         default: ""
         required: false
       build_time:
-        description: "自定义构建时间 (留空=自动获取当前北京时间) (示例 Sun Dec  1 08:10:00 UTC 2026)"
+        description: "自定义构建时间 (留空=自动获取当前北京时间) (示例 Tue Dec  1 08:10:00 UTC 2026)"
         type: string
         default: ""
         required: false
@@ -92,7 +100,7 @@ on:
         type: boolean
         default: false
       use_net_enhance:
-        description: "启用 网络增强 (IPSet + BBR)"
+        description: "启用 网络增强 (BBRv3 + IPSet + Qdisc + CIFS)"
         type: boolean
         default: false
       use_rekernel:
@@ -148,6 +156,7 @@ jobs:
     secrets: inherit
     with:
       kernelsu_variant: ${{ inputs.kernelsu_variant }}
+      build_channel: ${{ inputs.build_channel }}
 
   # ==================== Android 12 - 5.10 构建 ====================
   build-a12-5-10:
@@ -158,6 +167,7 @@ jobs:
     secrets: inherit
     with:
       kernelsu_variant: ${{ inputs.kernelsu_variant }}
+      build_channel: ${{ inputs.build_channel }}
       ksu_commit: ${{ needs.get-manager.outputs.ksuCommit }}
       ksu_cert_size: ${{ needs.get-manager.outputs.managerCertSize }}
       ksu_cert_hash: ${{ needs.get-manager.outputs.managerCertHash }}
@@ -185,6 +195,7 @@ jobs:
     secrets: inherit
     with:
       kernelsu_variant: ${{ inputs.kernelsu_variant }}
+      build_channel: ${{ inputs.build_channel }}
       ksu_commit: ${{ needs.get-manager.outputs.ksuCommit }}
       ksu_cert_size: ${{ needs.get-manager.outputs.managerCertSize }}
       ksu_cert_hash: ${{ needs.get-manager.outputs.managerCertHash }}
@@ -212,6 +223,7 @@ jobs:
     secrets: inherit
     with:
       kernelsu_variant: ${{ inputs.kernelsu_variant }}
+      build_channel: ${{ inputs.build_channel }}
       ksu_commit: ${{ needs.get-manager.outputs.ksuCommit }}
       ksu_cert_size: ${{ needs.get-manager.outputs.managerCertSize }}
       ksu_cert_hash: ${{ needs.get-manager.outputs.managerCertHash }}
@@ -239,6 +251,7 @@ jobs:
     secrets: inherit
     with:
       kernelsu_variant: ${{ inputs.kernelsu_variant }}
+      build_channel: ${{ inputs.build_channel }}
       ksu_commit: ${{ needs.get-manager.outputs.ksuCommit }}
       ksu_cert_size: ${{ needs.get-manager.outputs.managerCertSize }}
       ksu_cert_hash: ${{ needs.get-manager.outputs.managerCertHash }}
@@ -266,6 +279,7 @@ jobs:
     secrets: inherit
     with:
       kernelsu_variant: ${{ inputs.kernelsu_variant }}
+      build_channel: ${{ inputs.build_channel }}
       ksu_commit: ${{ needs.get-manager.outputs.ksuCommit }}
       ksu_cert_size: ${{ needs.get-manager.outputs.managerCertSize }}
       ksu_cert_hash: ${{ needs.get-manager.outputs.managerCertHash }}
@@ -451,7 +465,6 @@ jobs:
           # 功能开关显示
           echo "LZ4_STATUS=${{ inputs.use_zram && '开启' || '未开启' }}" >> $GITHUB_ENV
           echo "BBG_STATUS=${{ inputs.use_bbg && '开启' || '未开启' }}" >> $GITHUB_ENV
-          echo "NET_ENHANCE_STATUS=${{ inputs.use_net_enhance && '开启' || '未开启' }}" >> $GITHUB_ENV
           echo "REKERNEL_STATUS=${{ inputs.use_rekernel && '开启' || '未开启' }}" >> $GITHUB_ENV
           if [[ "${{ inputs.use_kpm }}" == enabled* ]]; then
             echo "KPM_STATUS=开启（未修补）" >> $GITHUB_ENV
@@ -461,7 +474,19 @@ jobs:
             echo "KPM_STATUS=未开启" >> $GITHUB_ENV
           fi
 
-          # Hook 类型（SukiSU / BakaSU / FinaSU 的 SUSFS 集成均为 fs 内联钩子）
+          # Droidspaces 容器支持（含 NTSync）
+          if [ "${{ inputs.droidspaces }}" = "off" ]; then
+            echo "DROIDSPACES_STATUS=未开启" >> $GITHUB_ENV
+          elif [ "${{ inputs.droidspaces_ntsync }}" = "true" ]; then
+            echo "DROIDSPACES_STATUS=开启（NTSync）" >> $GITHUB_ENV
+          else
+            echo "DROIDSPACES_STATUS=开启" >> $GITHUB_ENV
+          fi
+
+          # 网络增强 (BBRv3 / IPSet / Qdisc / CIFS)
+          echo "NET_ENHANCE_STATUS=${{ inputs.use_net_enhance && '开启' || '未开启' }}" >> $GITHUB_ENV
+
+          # Hook 类型
           echo "HOOK_TYPE=SUSFS Inline Hooks" >> $GITHUB_ENV
 
           # Mount 类型（FinaSU 使用 metamodule 模块架构）
@@ -471,8 +496,9 @@ jobs:
             echo "MOUNT_TYPE=Magic Mount" >> $GITHUB_ENV
           fi
 
-          # 发布标题
+          # 发布标题与正文标题
           echo "RELEASE_NAME=GKI Kernel: ${KSU_NAME} ${KSU_VER} + SUSFS ${SUS_VER}" >> $GITHUB_ENV
+          echo "RELEASE_HEADER=**${KSU_NAME} ${KSU_VER}** + **SUSFS ${SUS_VER}**" >> $GITHUB_ENV
 
       # ==================== 验证构建状态 ====================
       # 确保所有选中的构建任务都成功完成
@@ -517,6 +543,9 @@ jobs:
           esac
           echo "KSU_BRANCH=$BRANCH" >> $GITHUB_ENV
           echo "BRANCH_INFO=$BRANCH" >> $GITHUB_ENV
+          # 正式通道选用的 Release 标签（最新通道为空）
+          echo "CHANNEL_TAG=${{ needs.get-manager.outputs.channelTag }}" >> $GITHUB_ENV
+          echo "CHANNEL_NAME=${{ inputs.build_channel }}" >> $GITHUB_ENV
 
       # ==================== 获取 KernelSU 提交信息 ====================
       # 获取当前使用的 KernelSU 版本的 Git 提交信息
@@ -535,6 +564,19 @@ jobs:
               KSU_REF="$CUSTOM_COMMIT"
               KSU_URL="https://github.com/$REPO_URL2/commit/$CUSTOM_COMMIT"
               echo "BRANCH_INFO=custom" >> $GITHUB_ENV
+            fi
+          fi
+
+          if [ -z "${KSU_REF:-}" ] && [ -n "${CHANNEL_TAG:-}" ]; then
+            # 正式通道：取 Release 标签指向的提交（annotated tag 优先解引用）
+            COMMIT_HASH=$(git ls-remote $REPO_URL "refs/tags/${CHANNEL_TAG}^{}" | awk '{ print $1 }')
+            if [ -z "$COMMIT_HASH" ]; then
+              COMMIT_HASH=$(git ls-remote $REPO_URL "refs/tags/${CHANNEL_TAG}" | awk '{ print $1 }')
+            fi
+            if [ -n "$COMMIT_HASH" ]; then
+              KSU_REF=$COMMIT_HASH
+              KSU_URL="https://github.com/$REPO_URL2/releases/tag/$CHANNEL_TAG"
+              echo "BRANCH_INFO=release/${CHANNEL_TAG}" >> $GITHUB_ENV
             fi
           fi
 
@@ -620,11 +662,12 @@ jobs:
           cat > release_body.md << EOF
           ## GKI Kernel Release
 
-          **$KSU_NAME $KSU_VER** + **SUSFS $SUS_VER**
+          $RELEASE_HEADER
 
           | 项目 | 内容 |
           |:---|:---|
           | 发布类型 | ${{ inputs.release_type }} |
+          | 构建通道 | $CHANNEL_NAME |
           | 发布时间 | $BUILD_DATE |
           | 构建范围 | $build_targets |
 
@@ -633,16 +676,18 @@ jobs:
           | 项目 | 内容 |
           |:---|:---|
           | KernelSU 变体 | $KSU_NAME |
+          | KernelSU 版本 | $KSU_VER |
           | KernelSU 分支 | $BRANCH_INFO |
           | SUSFS | $SUS_VER |
           | Hook 类型 | $HOOK_TYPE |
           | 挂载方式 | $MOUNT_TYPE |
           | LTO | thin |
-          | BBG 基带保护 | $BBG_STATUS |
-          | 网络增强 (IPSet + BBR) | $NET_ENHANCE_STATUS |
           | ZRAM / LZ4KD | $LZ4_STATUS |
+          | BBG 基带保护 | $BBG_STATUS |
+          | 网络增强 (BBRv3 / IPSet / Qdisc / CIFS) | $NET_ENHANCE_STATUS |
           | Re-Kernel 驱动 | $REKERNEL_STATUS |
           | KPM | $KPM_STATUS |
+          | Droidspaces 容器支持 | $DROIDSPACES_STATUS |
 
           ### 下载说明
 
@@ -650,7 +695,7 @@ jobs:
 
           | 文件类型 | 用途 |
           |:---|:---|
-          | \`*_kernel-*.zip\` | AnyKernel3 内核刷入包 |
+          | \`*-AnyKernel3.zip\` | AnyKernel3 内核刷入包 |
           | \`*.img\` | boot、vendor_boot 等镜像文件 |
           | \`*.apk\` | Root 管理器 |
           | \`susfs-*.zip\` | SUSFS 配套模块 |
@@ -785,9 +830,16 @@ jobs:
           # 避免多版本同名散文件（Image/anykernel.sh...）在 Release 上冲突报错；
           # 上传全部模式（目录内已有 zip + img）保持逐文件上传，互不影响。
           # --clobber 保证 job 重跑时同名资产覆盖而非报错。
-          for dir in ./downloaded-artifacts/*_kernel-*/; do
+          for dir in ./downloaded-artifacts/*/; do
             [ -d "$dir" ] || continue
-            [[ "$dir" == *-Rejects/ ]] && continue
+            dir="${dir%/}"
+            case "$dir/" in
+              *-Build-Logs/|*-Rejects/|*Manager*/|*susfs-*/) continue ;;
+            esac
+            # 只处理内核刷入包：仅上传模式含 anykernel.sh，上传全部模式含 *-AnyKernel3.zip
+            if [ ! -f "$dir/anykernel.sh" ] && ! ls "$dir"/*-AnyKernel3.zip >/dev/null 2>&1; then
+              continue
+            fi
             if ! ls "$dir"*.zip >/dev/null 2>&1; then
               (cd "$dir" && zip -r -q -9 "$(basename "$dir").zip" .)
               echo "上传 $(basename "$dir").zip..."

@@ -30,6 +30,11 @@ on:
       ksu_variant:
         required: true
         type: string
+      build_channel:
+        description: "构建通道：正式 (Release) 对齐官方发行版；最新 (HEAD) 跟随上游最新提交（仅用于标识与摘要）"
+        required: false
+        type: string
+        default: "正式 (Release)"
       ksu_commit:
         description: "BakaSU 专用：KernelSU 检出到该提交以对齐官方最新上传构建（留空跟随 main HEAD）"
         required: false
@@ -134,6 +139,7 @@ jobs:
           echo "子版本号      : ${{ inputs.sub_level }}"
           echo "补丁级别      : ${{ inputs.os_patch_level }}"
           echo "KSU 变体      : ${{ inputs.ksu_variant }}"
+          echo "构建通道      : ${{ inputs.build_channel }}"
           echo "构建时间      : ${{ inputs.build_time }}"
           echo "SUSFS 状态    : ${{ inputs.enable_susfs }}"
           echo "ZRAM 压缩     : ${{ inputs.use_zram }}"
@@ -538,18 +544,13 @@ jobs:
                 echo "KernelSU 已检出到官方上传构建提交 $KSU_COMMIT (KSU 版本 $((30700 + $(git -C KernelSU rev-list --count HEAD))))"
               fi
               bash "$GITHUB_WORKSPACE/scripts/ksu_post_setup.sh" KernelSU bakasu
-              # 上游 BakaSU 自 48fa4bb 起以无条件 $(error) 暂停 SUSFS 内核构建
-              # （等待 simonpunk 同步最新 selinux_hide 模型）。本仓库在 SUSFS 补丁
-              # 阶段已适配该模型（scripts/susfs_fixes/apply.sh），这里替换为上游
-              # 预期的按内核版本门控，详见 scripts/bakasu_compat/resume_susfs.sh
-              bash "$GITHUB_WORKSPACE/scripts/bakasu_compat/resume_susfs.sh" KernelSU
               ;;
             "FinaSU")
               echo "添加 ${{ inputs.ksu_variant }}..."
               git clone https://github.com/LyraVoid/FinaSU.git KernelSU
-              # 内核侧检出到官方最新 Release 的同一提交（ksuCommit 由 get-manager
-              # 从 Release tag 解析；Kbuild 以 30000 + git 提交数 计算版本，与官方
-              # 发行管理器 versionCode 同源同值），保证与发行的管理器严格一致
+              # 内核侧检出到 get-manager 选定的提交：正式通道为 Release 标签提交，
+              # 最新通道为 build-manager.yml 最新构建提交；Kbuild 以 30000 + git
+              # 提交数计算版本，与对应管理器 versionCode 同源同值
               if [ -n "$KSU_COMMIT" ]; then
                 if ! git -C KernelSU checkout --detach "$KSU_COMMIT" 2>/dev/null; then
                   git -C KernelSU fetch origin "$KSU_COMMIT"
@@ -640,6 +641,28 @@ jobs:
             echo "KSU_LATEST_COMMIT_DATE=未知" >> $GITHUB_ENV
           fi
 
+      - name: 计算 AnyKernel3 命名版本
+        working-directory: ${{ env.KERNEL_ROOT }}
+        run: |
+          KSU_VERSION=""
+          if [ -n "${{ inputs.ksu_commit }}" ] && [ -d KernelSU/.git ]; then
+            KSU_COUNT=$(git -C KernelSU rev-list --count "${{ inputs.ksu_commit }}" 2>/dev/null || echo "")
+            if [ -n "$KSU_COUNT" ]; then
+              case "${{ inputs.ksu_variant }}" in
+                SukiSU) KSU_VERSION=$((40000 + KSU_COUNT - 2815)) ;;
+                BakaSU) KSU_VERSION=$((30700 + KSU_COUNT)) ;;
+                FinaSU) KSU_VERSION=$((30000 + KSU_COUNT)) ;;
+              esac
+            fi
+          fi
+          if [ -n "$KSU_VERSION" ]; then
+            AK3_NAME="${{ inputs.ksu_variant }}-${KSU_VERSION}-${CONFIG}"
+          else
+            AK3_NAME="${{ inputs.ksu_variant }}_kernel-${CONFIG}"
+          fi
+          echo "AK3_NAME=$AK3_NAME" >> $GITHUB_ENV
+          echo "AnyKernel3 命名: $AK3_NAME"
+
       # FinaSU 的内核侧 SUSFS 集成已并入 scripts/susfs_fixes/apply.sh：
       # 上游自 5b83330b（2026-10-23）起树内原生集成 SUSFS，与 SukiSU/BakaSU
       # 同为「驱动侧不打补丁」形态，由「应用 SUSFS 补丁」步骤统一校验并应用
@@ -661,12 +684,10 @@ jobs:
 
       # SukiSU builtin 分支的 hook/lsm_hook.c 仍以旧签名调用
       # security_add_hooks(hooks, count, "ksu")，6.8+ 内核要求 const struct lsm_id *，
-      # android16-6.12 GKI 编译直接失败；kpm super_access.c 引用的
-      # netlink_kernel_cfg.cb_mutex 在 Linux 6.11 被移除，KPM 开启时同样失败
-      # （该文件已被上游迁至 kernel/extension/kpm/，补丁按实际路径定位）。
-      # 补丁内部以 LINUX_VERSION_CODE 守卫，6.10 及以下内核行为不变，
+      # android16-6.12 GKI 编译直接失败。
+      # 补丁内部以 LINUX_VERSION_CODE 守卫，6.7 及以下内核行为不变，
       # SukiSU 上游修复后按内容检测自动跳过。
-      - name: 应用 SukiSU 内核 API 兼容补丁 (6.8+ lsm_id / 6.11+ netlink cb_mutex)
+      - name: 应用 SukiSU 内核 API 兼容补丁 (6.8+ lsm_id)
         if: inputs.ksu_variant == 'SukiSU'
         working-directory: ${{ env.KERNEL_ROOT }}
         run: bash "$GITHUB_WORKSPACE/scripts/sukisu_compat/apply.sh" KernelSU
@@ -883,20 +904,142 @@ jobs:
             exit 1
           }
 
-          echo "自动选择 NTSync 补丁: ${NTSYNC_PATCH}.patch"
-          if ! wget -q "https://raw.githubusercontent.com/Goldzxcbug/Droidspaces_Kernel_patch/refs/heads/main/NTsync/ntsync_base.patch"; then
-            ntsync_fail "NTSync 基础补丁下载失败"
-          fi
-          if ! wget -q "https://raw.githubusercontent.com/Goldzxcbug/Droidspaces_Kernel_patch/refs/heads/main/NTsync/${NTSYNC_PATCH}.patch"; then
-            ntsync_fail "NTSync 平台补丁 ${NTSYNC_PATCH}.patch 下载失败"
+          NTSYNC_PATCH_URL="https://raw.githubusercontent.com/Goldzxcbug/Droidspaces_Kernel_patch/refs/heads/main/NTsync"
+          NTSYNC_COMPAT_HEADER="$GITHUB_WORKSPACE/scripts/ntsync_compat/ntsync_lockdep_compat.h"
+
+          # 平台接线：Kconfig/Makefile 直接幂等写入。
+          # 上游平台补丁把「接线」和「lockdep 回移」混在一个 patch 里，任一上下文漂移都会让整步失败；
+          # 接线本身只有两行，独立写入后不再受上游补丁上下文影响。
+          ntsync_wire_misc() {
+            if ! grep -q '^config NTSYNC$' drivers/misc/Kconfig; then
+              awk '
+                !done && /^endmenu$/ {
+                  print "config NTSYNC"
+                  print "\ttristate \"NT synchronization primitive emulation\""
+                  print "\tdefault\tm"
+                  print "\thelp"
+                  print "\t  This module provides kernel support for emulation of Windows NT"
+                  print "\t  synchronization primitives. It is not a hardware driver."
+                  print ""
+                  print "\t  To compile this driver as a module, choose M here: the"
+                  print "\t  module will be called ntsync."
+                  print ""
+                  print "\t  If unsure, say N."
+                  print ""
+                  done = 1
+                }
+                { print }
+              ' drivers/misc/Kconfig > drivers/misc/Kconfig.ntsync &&
+                mv drivers/misc/Kconfig.ntsync drivers/misc/Kconfig
+            else
+              # 已存在但被标 BROKEN（6.12 主线）时摘掉依赖，否则该符号永远不可见。
+              ntsync_strip_broken
+            fi
+
+            if ! grep -Fq 'obj-$(CONFIG_NTSYNC)' drivers/misc/Makefile; then
+              printf 'obj-$(CONFIG_NTSYNC)\t\t+= ntsync.o\n' >> drivers/misc/Makefile
+            fi
+
+            ntsync_wired
+          }
+
+          # lockdep 兼容层：v5.13 才引入 lockdep_assert()/LOCK_STATE_*。
+          # 上游平台补丁的 include/linux/lockdep.h hunk 期望 lockdep_assert_none_held_once()（v5.13+），
+          # 在 5.10 上必然 reject，而 kernel/locking/lockdep.c 却会被改掉 —— 半应用的内核根本编译不过。
+          # 这里只补驱动实际用到的两个符号，不动内核 core locking 代码，语义与上游一致。
+          ntsync_inject_lockdep_compat() {
+            cp "$NTSYNC_COMPAT_HEADER" drivers/misc/ntsync_lockdep_compat.h
+            if ! grep -q 'ntsync_lockdep_compat.h' drivers/misc/ntsync.c; then
+              sed -i 's|^#define NTSYNC_NAME|#include "ntsync_lockdep_compat.h"\n\n#define NTSYNC_NAME|' drivers/misc/ntsync.c
+            fi
+            grep -q 'ntsync_lockdep_compat.h' drivers/misc/ntsync.c
+          }
+
+          ntsync_has_lockdep_api() {
+            grep -q 'define lockdep_assert(' include/linux/lockdep.h &&
+              grep -q 'LOCK_STATE_NOT_HELD' include/linux/lockdep.h
+          }
+
+          # 6.12 主线已带 NTSYNC 源码，但 Kconfig 里标了 depends on BROKEN，
+          # 此时不能算「已集成」，否则 defconfig 的 CONFIG_NTSYNC=y 会被 Kconfig 丢弃。
+          ntsync_kconfig_block() {
+            awk '
+              /^config NTSYNC$/ { inblk = 1; print; next }
+              inblk && /^(config |menuconfig |endmenu|source |menu )/ { exit }
+              inblk { print }
+            ' drivers/misc/Kconfig
+          }
+
+          ntsync_kconfig_wired() {
+            grep -q '^config NTSYNC$' drivers/misc/Kconfig &&
+              ! ntsync_kconfig_block |
+                grep -q '^[[:space:]]*depends on[[:space:]]*BROKEN[[:space:]]*$'
+          }
+
+          ntsync_strip_broken() {
+            grep -q '^config NTSYNC$' drivers/misc/Kconfig || return 0
+            awk '
+              /^config NTSYNC$/ { inblk = 1; print; next }
+              inblk && /^(config |menuconfig |endmenu|source |menu )/ { inblk = 0 }
+              inblk && /^[[:space:]]*depends on[[:space:]]*BROKEN[[:space:]]*$/ { next }
+              { print }
+            ' drivers/misc/Kconfig > drivers/misc/Kconfig.ntsync &&
+              mv drivers/misc/Kconfig.ntsync drivers/misc/Kconfig
+          }
+
+          ntsync_wired() {
+            ntsync_kconfig_wired &&
+              grep -Fq 'obj-$(CONFIG_NTSYNC)' drivers/misc/Makefile
+          }
+
+          if [[ -f drivers/misc/ntsync.c && -f include/uapi/linux/ntsync.h ]]; then
+            echo "NTSync 源码已存在（主线自带），跳过基础补丁"
+          elif [[ ! -e drivers/misc/ntsync.c && ! -e include/uapi/linux/ntsync.h ]]; then
+            wget -q "${NTSYNC_PATCH_URL}/ntsync_base.patch" ||
+              ntsync_fail "NTSync 基础补丁下载失败"
+            patch --batch --forward -p1 < ntsync_base.patch ||
+              ntsync_fail "NTSync 基础补丁应用失败（可能不兼容当前内核）"
+          else
+            ntsync_fail "NTSync 源码不完整（驱动与 uapi 头文件不匹配）"
           fi
 
-          if ! patch -p1 < "ntsync_base.patch"; then
-            ntsync_fail "NTSync 基础补丁应用失败（可能不兼容当前内核）"
+          # 平台补丁：源码、Kconfig/Makefile 接线、lockdep API 三者齐备才算已集成。
+          if ntsync_wired && ntsync_has_lockdep_api; then
+            echo "NTSync 已集成，跳过平台补丁"
+          else
+            wget -q "${NTSYNC_PATCH_URL}/${NTSYNC_PATCH}.patch" ||
+              ntsync_fail "NTSync 平台补丁 ${NTSYNC_PATCH}.patch 下载失败"
+
+            # 先 dry-run：补丁一旦部分应用（lockdep.c 改了、lockdep.h 没改）内核就无法编译，
+            # 因此只在能完整应用时才真正落盘，否则整体走本地接线/兼容层。
+            if patch --batch --forward --dry-run -p1 < "${NTSYNC_PATCH}.patch" > /tmp/ntsync_platform.log 2>&1; then
+              echo "上游平台补丁可完整应用，开始应用（含 lockdep 回移）"
+              patch --batch --forward -p1 < "${NTSYNC_PATCH}.patch" ||
+                ntsync_fail "NTSync 平台补丁应用失败（可能不兼容当前内核）"
+            else
+              echo "::notice title=NTSync 兼容层::上游平台补丁上下文不匹配，改用本地接线（功能等价）"
+              sed -n '1,30p' /tmp/ntsync_platform.log
+              EXTRA_FILES=$(grep '^diff --git' "${NTSYNC_PATCH}.patch" |
+                grep -v 'drivers/misc/Kconfig' | grep -v 'drivers/misc/Makefile' |
+                grep -v 'include/linux/lockdep.h' | grep -v 'kernel/locking/lockdep.c' || true)
+              if [ -n "$EXTRA_FILES" ]; then
+                echo "::warning title=NTSync 兼容层::平台补丁还包含未适配的改动，已跳过：$EXTRA_FILES"
+              fi
+              ntsync_wire_misc || ntsync_fail "NTSync 平台接线写入失败"
+              if ntsync_has_lockdep_api; then
+                echo "内核已提供 lockdep_assert()/LOCK_STATE_*，无需 lockdep 兼容层"
+              else
+                ntsync_inject_lockdep_compat || ntsync_fail "NTSync lockdep 兼容层注入失败"
+                if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+                  echo "" >> "$GITHUB_STEP_SUMMARY"
+                  echo "> 🔧 **NTSync**：上游平台补丁与本内核上下文不匹配，已启用本地 lockdep 兼容层（功能等价，构建继续）" >> "$GITHUB_STEP_SUMMARY"
+                fi
+              fi
+            fi
           fi
-          if ! patch -p1 < "${NTSYNC_PATCH}.patch"; then
-            ntsync_fail "NTSync 平台补丁应用失败（可能不兼容当前内核）"
-          fi
+
+          # 兜底：部分版本的平台补丁只改 Kconfig（如 6.12 仅摘 BROKEN），Makefile 接线需在此确保。
+          ntsync_wired || ntsync_wire_misc || ntsync_fail "NTSync 平台接线不完整（Kconfig/Makefile）"
 
           cd ..
 
@@ -1142,95 +1285,147 @@ jobs:
           echo "CONFIG_BBG=y" >> common/arch/arm64/configs/gki_defconfig
           sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' common/security/Kconfig
 
-      - name: 添加 网络增强配置 (IPSet + BBR)
+      - name: 应用网络增强（BBRv3 / IPSet / Qdisc / CIFS）
         if: inputs.use_net_enhance
-        working-directory: ${{ env.KERNEL_ROOT }}
+        working-directory: ${{ env.KERNEL_ROOT }}/common
         run: |
+          set -euo pipefail
+
           net_fail() {
             if [ "$SKIP_INCOMPATIBLE" = "true" ]; then
-              echo "::warning title=网络增强 已跳过::$1，已跳过 网络增强 (IPSet + BBR) 功能"
+              echo "::warning title=网络增强 已跳过::$1，已跳过 网络增强功能"
               if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
                 echo "" >> "$GITHUB_STEP_SUMMARY"
-                echo "> ⏭️ **网络增强 (IPSet + BBR)** 已自动跳过：$1（构建未中断）" >> "$GITHUB_STEP_SUMMARY"
+                echo "> ⏭️ **网络增强 (BBRv3 / IPSet / Qdisc / CIFS)** 已自动跳过：$1（构建未中断）" >> "$GITHUB_STEP_SUMMARY"
               fi
-              echo "NET_ENHANCE_SKIPPED=true" >> "$GITHUB_ENV"
+              echo "NET_ENHANCE_SKIPPED=true" >> "${GITHUB_ENV:-/dev/null}"
               exit 0
             fi
             echo "::error::$1"
             exit 1
           }
 
-          # 幂等写入：行已存在则跳过；符号已有赋值（含 =m）或 "# not set" 则原地替换；否则追加
-          ensure_cfg() {
-            local line="$1"
-            local cfg="${line%%=*}"
-            if grep -qxF "$line" "$DEFCONFIG"; then
-              return 0
-            fi
-            if grep -Eq "^${cfg}=|^# ${cfg} is not set$" "$DEFCONFIG"; then
-              sed -i -E "s|^${cfg}=.*|${line}|; s|^# ${cfg} is not set$|${line}|" "$DEFCONFIG"
+          echo "=== 应用网络增强（BBRv3 / IPSet / Qdisc / CIFS）==="
+          BBR3_DIR="$KERNEL_PATCHES/common/bbrv3"
+          KVER="${{ inputs.kernel_version }}"
+          AVER="${{ inputs.android_version }}"
+
+          # ---------- BBRv3 补丁：按版本分派（来自 WildKernels/kernel_patches） ----------
+          case "$AVER-$KVER" in
+            android12-5.10) BBR3_PATCH="$BBR3_DIR/0001-net-tcp-backport-BBRv3-to-android12-5.10.patch" ;;
+            android13-5.15) BBR3_PATCH="$BBR3_DIR/0001-net-tcp-backport-BBRv3-to-android13-5.15.patch" ;;
+            android14-6.1)  BBR3_PATCH="$BBR3_DIR/0001-net-tcp-backport-BBRv3-to-android14-6.1.patch" ;;
+            android15-6.6)  BBR3_PATCH="$BBR3_DIR/0001-net-tcp-backport-BBRv3-to-android15-6.6.patch" ;;
+            *) BBR3_PATCH="" ;;
+          esac
+
+          # android16-6.12 无 backport 补丁，仅保留基线 BBR v1
+          if [ -n "$BBR3_PATCH" ]; then
+            [ -f "$BBR3_PATCH" ] || net_fail "BBRv3 补丁不存在：${BBR3_PATCH#"$KERNEL_PATCHES"/}"
+            if patch -p1 --dry-run --forward < "$BBR3_PATCH" >/dev/null 2>&1; then
+              patch -p1 --no-backup-if-mismatch < "$BBR3_PATCH"
+              echo "[+] BBRv3 补丁已应用"
+            elif patch -p1 --dry-run --forward -F 3 < "$BBR3_PATCH" >/dev/null 2>&1; then
+              # LTS 分支会持续合入上游 stable 提交（如 sysctl_net_ipv4.c 的
+              # tcp_min_rcvbuf），补丁的上下文行随之漂移。fuzz 3 只放宽上下文
+              # 匹配，hunk 内容仍须原样落位，可安全吸收这类偏移。
+              patch -p1 --no-backup-if-mismatch -F 3 < "$BBR3_PATCH"
+              echo "[+] BBRv3 补丁已应用（LTS 上下文漂移，fuzz 3）"
+            elif grep -q '^config TCP_CONG_BBR3' net/ipv4/Kconfig; then
+              echo "[*] BBRv3 补丁此前已应用，跳过"
             else
-              echo "$line" >> "$DEFCONFIG"
+              net_fail "BBRv3 补丁应用失败（${AVER}-${KVER}）"
+            fi
+            # 防止 fuzz 应用时漏掉新增文件/配置项后继续编译
+            [ -f net/ipv4/tcp_bbr3.c ] || net_fail "BBRv3 补丁应用后缺少 net/ipv4/tcp_bbr3.c"
+            grep -q '^config TCP_CONG_BBR3' net/ipv4/Kconfig || net_fail "BBRv3 补丁应用后缺少 TCP_CONG_BBR3 配置项"
+          else
+            echo "[*] ${AVER}-${KVER} 无 BBRv3 backport，使用 BBR v1"
+          fi
+
+          # 5.15.41 等旧内核缺少 tcp_snd_cwnd accessors（新 5.15 已回移），
+          # BBRv3 补丁默认依赖它们；仅在缺失时补齐。
+          if [ -n "$BBR3_PATCH" ] && ! grep -q 'tcp_snd_cwnd' include/net/tcp.h; then
+            python3 "$GITHUB_WORKSPACE/scripts/net_compat/add_tcp_snd_cwnd.py" \
+              || net_fail "旧内核 tcp_snd_cwnd 兼容处理失败"
+          fi
+
+          # 5.10 缺少 proc_dou8vec_minmax（BBRv3 依赖的 5.15+ sysctl API），补两个前置补丁
+          if [ "$KVER" = "5.10" ] && ! grep -qF 'int proc_dou8vec_minmax(' include/linux/sysctl.h 2>/dev/null; then
+            for prepatch in sysctl_add_proc_dou8vec_minmax sysctl_fix_data-races_in_proc_dou8vec_minmax; do
+              if patch -p1 --dry-run < "$BBR3_DIR/$prepatch.patch" >/dev/null 2>&1; then
+                patch -p1 --no-backup-if-mismatch < "$BBR3_DIR/$prepatch.patch"
+              else
+                net_fail "5.10 sysctl 前置补丁应用失败：$prepatch"
+              fi
+            done
+            echo "[+] 5.10 sysctl 前置补丁已应用"
+          fi
+
+          set_config() {
+            local key="$1" value="$2"
+            if grep -q "^$key=" "$DEFCONFIG"; then
+              sed -i "s|^$key=.*|$key=$value|g" "$DEFCONFIG"
+            elif grep -q "^# $key is not set" "$DEFCONFIG"; then
+              sed -i "s|^# $key is not set|$key=$value|g" "$DEFCONFIG"
+            else
+              echo "$key=$value" >> "$DEFCONFIG"
             fi
           }
 
-          # 兼容性检查：BBR 与 IPSet 子系统必须存在于内核源码
-          if [ ! -f common/net/ipv4/tcp_bbr.c ]; then
-            net_fail "内核源码缺少 net/ipv4/tcp_bbr.c，无法启用 BBR"
+          # IPSet 全家桶 + netfilter 联动（各版本 Kconfig 均已验证存在）
+          for cfg in IP_SET IP_SET_BITMAP_IP IP_SET_BITMAP_IPMAC IP_SET_BITMAP_PORT \
+            IP_SET_HASH_IP IP_SET_HASH_IPMARK IP_SET_HASH_IPPORT IP_SET_HASH_IPPORTIP \
+            IP_SET_HASH_IPPORTNET IP_SET_HASH_IPMAC IP_SET_HASH_MAC \
+            IP_SET_HASH_NETPORTNET IP_SET_HASH_NET IP_SET_HASH_NETNET \
+            IP_SET_HASH_NETPORT IP_SET_HASH_NETIFACE IP_SET_LIST_SET \
+            NETFILTER_XT_MATCH_ADDRTYPE NETFILTER_XT_SET NETFILTER_XT_TARGET_LOG \
+            NETFILTER_XT_MATCH_RECENT IP6_NF_NAT IP6_NF_TARGET_MASQUERADE; do
+            set_config "CONFIG_$cfg" y
+          done
+          set_config CONFIG_IP_SET_MAX 65534
+
+          # TCP 拥塞控制算法：已打 BBRv3 补丁的版本默认 bbr3，其余默认 bbr
+          for cfg in TCP_CONG_ADVANCED TCP_CONG_BBR TCP_CONG_CUBIC \
+            TCP_CONG_BIC TCP_CONG_WESTWOOD TCP_CONG_HTCP; do
+            set_config "CONFIG_$cfg" y
+          done
+          if [ -n "$BBR3_PATCH" ]; then
+            set_config CONFIG_TCP_CONG_BBR3 y
+            set_config CONFIG_DEFAULT_BBR3 y
+            set_config CONFIG_DEFAULT_TCP_CONG '"bbr3"'
+          else
+            set_config CONFIG_DEFAULT_BBR y
+            set_config CONFIG_DEFAULT_TCP_CONG '"bbr"'
           fi
-          if [ ! -d common/net/netfilter/ipset ]; then
-            net_fail "内核源码缺少 net/netfilter/ipset，无法启用 IPSet"
+
+          # 流量整形 Qdisc + 连接标记 + TTL/HopLimit + WireGuard
+          for cfg in NET_SCH_FQ NET_SCH_FQ_CODEL NET_SCH_CAKE NET_ACT_CONNMARK \
+            IP_NF_TARGET_TTL IP6_NF_TARGET_HL IP6_NF_MATCH_HL WIREGUARD; do
+            set_config "CONFIG_$cfg" y
+          done
+
+          # CIFS 网络文件系统（NETFS_SUPPORT 为隐藏符号，由 Kconfig 按需选中）
+          for cfg in CIFS NETWORK_FILESYSTEMS KEYS CIFS_XATTR CIFS_POSIX; do
+            set_config "CONFIG_$cfg" y
+          done
+
+          # 6.12 的 NETFS 内置化后需移除 modules.bzl 的模块条目，否则打包失败
+          if [ "$AVER" = "android16" ] && grep -q '"fs/netfs/netfs.ko",' modules.bzl 2>/dev/null; then
+            sed -i '/"fs\/netfs\/netfs\.ko",/d' modules.bzl
           fi
-
-          # BBR：5.10/5.15/6.1 需先开 ADVANCED（DEFAULT_BBR 受其门控）；
-          # 6.6/6.12 已内建 BBR，ensure_cfg 对已存在的行自动跳过
-          ensure_cfg "CONFIG_TCP_CONG_ADVANCED=y"
-          ensure_cfg "CONFIG_TCP_CONG_BBR=y"
-          ensure_cfg "CONFIG_DEFAULT_BBR=y"
-          ensure_cfg "CONFIG_NET_SCH_FQ=y"
-          ensure_cfg "CONFIG_NET_SCH_FQ_CODEL=y"
-
-          # IPSet：GKI 各版本均未启用，全新内建（内核侧支持；用户态需配合 ipset 工具使用）
-          # IP_SET_MAX 上限 65534 已由上游 Kconfig（range 2 65534）验证，无需改源码
-          ensure_cfg "CONFIG_IP_SET=y"
-          ensure_cfg "CONFIG_IP_SET_MAX=65534"
-          ensure_cfg "CONFIG_IP_SET_BITMAP_IP=y"
-          ensure_cfg "CONFIG_IP_SET_BITMAP_IPMAC=y"
-          ensure_cfg "CONFIG_IP_SET_BITMAP_PORT=y"
-          ensure_cfg "CONFIG_IP_SET_HASH_IP=y"
-          ensure_cfg "CONFIG_IP_SET_HASH_IPMAC=y"
-          ensure_cfg "CONFIG_IP_SET_HASH_IPMARK=y"
-          ensure_cfg "CONFIG_IP_SET_HASH_IPPORT=y"
-          ensure_cfg "CONFIG_IP_SET_HASH_IPPORTIP=y"
-          ensure_cfg "CONFIG_IP_SET_HASH_IPPORTNET=y"
-          ensure_cfg "CONFIG_IP_SET_HASH_MAC=y"
-          ensure_cfg "CONFIG_IP_SET_HASH_NET=y"
-          ensure_cfg "CONFIG_IP_SET_HASH_NETIFACE=y"
-          ensure_cfg "CONFIG_IP_SET_HASH_NETNET=y"
-          ensure_cfg "CONFIG_IP_SET_HASH_NETPORT=y"
-          ensure_cfg "CONFIG_IP_SET_HASH_NETPORTNET=y"
-          ensure_cfg "CONFIG_IP_SET_LIST_SET=y"
-          ensure_cfg "CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=y"
-          ensure_cfg "CONFIG_NETFILTER_XT_SET=y"
-          ensure_cfg "CONFIG_IP6_NF_NAT=y"
-          ensure_cfg "CONFIG_IP6_NF_TARGET_MASQUERADE=y"
-
-          # 附加拥塞算法（BBR 之外的备选，各 GKI 版本符号均存在）。
-          # BIC/WESTWOOD/HTCP 在 mainline Kconfig 中 default m：开启 TCP_CONG_ADVANCED
-          # 后若不显式置 =y，会以模块形式编译（如 tcp_bic.ko）而 GKI module_outs 未声明，
-          # 导致 bazel 构建失败，故三者必须全部内建。
-          ensure_cfg "CONFIG_TCP_CONG_BIC=y"
-          ensure_cfg "CONFIG_TCP_CONG_CUBIC=y"
-          ensure_cfg "CONFIG_TCP_CONG_WESTWOOD=y"
-          ensure_cfg "CONFIG_TCP_CONG_HTCP=y"
 
           # 写后校验：关键符号必须落盘
-          grep -q '^CONFIG_DEFAULT_BBR=y$' "$DEFCONFIG" || net_fail "BBR 默认拥塞控制配置写入校验失败"
           grep -q '^CONFIG_IP_SET=y$' "$DEFCONFIG" || net_fail "IPSet 配置写入校验失败"
           grep -q '^CONFIG_IP_SET_MAX=65534$' "$DEFCONFIG" || net_fail "IPSet 集合数上限配置写入校验失败"
           grep -q '^CONFIG_NET_SCH_FQ=y$' "$DEFCONFIG" || net_fail "FQ qdisc 配置写入校验失败"
-          grep -q '^CONFIG_NETFILTER_XT_SET=y$' "$DEFCONFIG" || net_fail "XT_SET 配置写入校验失败"
-          echo "网络增强 (IPSet + BBR) 配置已写入 defconfig"
+          grep -q '^CONFIG_CIFS=y$' "$DEFCONFIG" || net_fail "CIFS 配置写入校验失败"
+          if [ -n "$BBR3_PATCH" ]; then
+            grep -q '^CONFIG_DEFAULT_TCP_CONG="bbr3"$' "$DEFCONFIG" || net_fail "BBRv3 默认拥塞控制配置写入校验失败"
+          else
+            grep -q '^CONFIG_DEFAULT_TCP_CONG="bbr"$' "$DEFCONFIG" || net_fail "BBR 默认拥塞控制配置写入校验失败"
+          fi
+          echo "[+] 网络增强配置完成"
 
       - name: 应用 Re-Kernel
         if: inputs.use_rekernel
@@ -1298,6 +1493,7 @@ jobs:
         run: |
           cat >> "$DEFCONFIG" << 'EOF'
           CONFIG_KSU=y
+          CONFIG_KALLSYMS_ALL=y
           CONFIG_TMPFS_XATTR=y
           CONFIG_TMPFS_POSIX_ACL=y
           EOF
@@ -1340,10 +1536,7 @@ jobs:
             CURRENT_SUB=99999
           fi
           if [[ "${{ inputs.ksu_variant }}" == "BakaSU" && "${{ inputs.android_version }}" == "android13" && "${{ inputs.kernel_version }}" == "5.15" && "$CURRENT_SUB" -ge 74 && "$CURRENT_SUB" -le 137 ]]; then
-            {
-              echo "CONFIG_KALLSYMS=y"
-              echo "CONFIG_KALLSYMS_ALL=y"
-            } >> "$DEFCONFIG"
+            echo "CONFIG_KALLSYMS=y" >> "$DEFCONFIG"
             # 修复 5.15.74~5.15.137: kallsyms_on_each_symbol 仅在 LIVEPATCH 下编译，导致 BakaSU 链接失败
             KALLSYMS_C="./common/kernel/kallsyms.c"
             if [ -f "$KALLSYMS_C" ] \
@@ -1425,7 +1618,7 @@ jobs:
 
             TIME_REGEX='^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) ( ?[1-9]|0[1-9]|[12][0-9]|3[01]) ([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9] UTC [0-9]{4}$'
             if [[ ! "$INPUT_TIME" =~ $TIME_REGEX ]]; then
-              echo "::error title=构建时间格式错误::自定义构建时间必须形如 Sun Dec  1 08:10:00 UTC 2026，请删除多余前缀并使用两位日期。"
+              echo "::error title=构建时间格式错误::自定义构建时间必须形如 Tue Dec  1 08:10:00 UTC 2026，请删除多余前缀并使用两位日期。"
               exit 1
             fi
 
@@ -1666,7 +1859,7 @@ jobs:
         if: inputs.artifact_upload_mode == '上传全部'
         run: |
           cd "$ANYKERNEL3"
-          ZIP_NAME="${{ inputs.android_version }}-${{ inputs.kernel_version }}.${NAME_SUBLEVEL}-${{ inputs.os_patch_level }}-AnyKernel3.zip"
+          ZIP_NAME="${AK3_NAME}-AnyKernel3.zip"
           mv ../Image ./Image
           zip -r "../$ZIP_NAME" ./*
 
@@ -1756,7 +1949,7 @@ jobs:
         if: inputs.artifact_upload_mode != '上传全部'
         uses: actions/upload-artifact@v6
         with:
-          name: ${{ inputs.ksu_variant }}_kernel-${{ env.CONFIG }}-AnyKernel3
+          name: ${{ env.AK3_NAME }}-AnyKernel3
           path: "AnyKernel3-package/*"
           if-no-files-found: error
           compression-level: 9
@@ -1765,7 +1958,7 @@ jobs:
         if: inputs.artifact_upload_mode == '上传全部'
         uses: actions/upload-artifact@v6
         with:
-          name: ${{ inputs.ksu_variant }}_kernel-${{ env.CONFIG }}
+          name: ${{ env.AK3_NAME }}-AnyKernel3
           path: |
             *AnyKernel3.zip
             *.img

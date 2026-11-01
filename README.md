@@ -37,10 +37,11 @@ Built upon [AnyKernel3](https://github.com/osm0sis/AnyKernel3), this repository 
 | Feature | Description |
 |:---|:---|
 | 🔐 KernelSU | FinaSU (integrated) |
+| 🔀 Build Channel | Release: latest **stable** upstream Release (tag commit + same-version manager), falls back to the newest official default-branch build when the upstream only ships pre-releases; Latest: pins the default-branch HEAD and picks the newest manager build matching that version |
 | 🙈 SUSFS | Kernel-level hiding working with KSU to complete environment spoofing |
 | 💾 ZRAM LZ4 | ZRAM Compression Algorithm Patch |
 | 🛡️ BBG (Baseband Guard) | BBG patch to protect the baseband partitions from accidental wipe |
-| 🌐 Network enhancement | Optional IPSet + BBR kernel config (BBR default congestion control, fq/fq_codel qdisc, full IPSet types up to 65534 sets, IPv6 NAT/masquerade, extra congestion algorithms) |
+| 🌐 Network enhancement | Optional network stack upgrade: BBRv3 backport where available (defaults to BBR v1 otherwise), full IPSet types up to 65534 sets, fq/fq_codel/cake qdisc, connmark, IPv6 NAT/masquerade, TTL/HopLimit match, WireGuard, CIFS |
 | ⚡ KPM | Optional KPM feature / build-time patching |
 | 🔔 Re-Kernel | Optional Re-Kernel driver integration |
 | 🩹 CVE-2026-43499 | Optional automatic application of the rtmutex fix |
@@ -55,6 +56,10 @@ Built upon [AnyKernel3](https://github.com/osm0sis/AnyKernel3), this repository 
 3. Click **Run workflow** and fill in the parameters as needed:
    - `android_version` / `kernel_version` / `sub_level` / `os_patch_level`
    - `ksu_variant`: KernelSU variant (FinaSU)
+   - `build_channel`: build channel
+     - `正式 (Release)`: manager APK taken from the latest **stable** upstream Release (`prerelease=false`) and the kernel pinned to that release tag commit, so manager and kernel versions match exactly; when the upstream only ships rc/pre-releases, the newest official default-branch build is used and pinned instead
+     - `最新 (HEAD)`: kernel pinned to the default-branch HEAD, and the manager is the newest build whose version matches HEAD (FinaSU uses the latest Release), so kernel and manager never drift apart
+     - Both channels print the selected channel, pinned commit and manager version in the logs and the run summary
    - Feature switches: `enable_susfs`, `use_zram`, `use_bbg`, `use_net_enhance`, `use_kpm`, `skip_incompatible`, etc.
 4. Once the build finishes, download the **Artifacts** from the run page:
    - `AnyKernel3.zip` — flashable zip (recommended; flash via custom Recovery or KSU)
@@ -152,10 +157,11 @@ A commit is a hash string representing the state of a repository at a certain po
 | 特性 | 说明 |
 |:---|:---|
 | 🔐 KernelSU | 已集成 FinaSU |
+| 🔀 构建通道 | 正式：上游最新**正式版** Release（标签提交 + 同版本管理器），上游只有预发布版时改用官方默认分支最新上传构建；最新：锁定默认分支 HEAD，管理器取与 HEAD 版本一致的最新构建 |
 | 🙈 SUSFS | 内核级隐藏，配合 KSU 完成环境伪装 |
 | 💾 ZRAM LZ4 | ZRAM 压缩算法补丁 |
 | 🛡️ BBG 基带保护 | BBG（BaseBand Guard）补丁，保护基带分区，防止基带被意外擦除 |
-| 🌐 网络增强 | 可选 IPSet + BBR 内核配置（BBR 默认拥塞控制 + fq/fq_codel 队列 + IPSet 全类型，集合上限 65534 + IPv6 NAT/伪装 + 附加拥塞算法） |
+| 🌐 网络增强 | 可选网络栈增强：可用版本回移 BBRv3（无 backport 时退回 BBR v1）+ IPSet 全类型（集合上限 65534）+ fq/fq_codel/cake 队列 + connmark + IPv6 NAT/伪装 + TTL/HopLimit 匹配 + WireGuard + CIFS |
 | ⚡ KPM | 可选开启 KPM 功能 / 构建期修补 |
 | 🔔 Re-Kernel | 可选集成 Re-Kernel 驱动 |
 | 🩹 CVE-2026-43499 | 可选自动应用 rtmutex 修复补丁 |
@@ -169,7 +175,8 @@ A commit is a hash string representing the state of a repository at a certain po
 2. 进入 **Actions** 页面，选择对应内核版本的工作流
 3. 点击 **Run workflow**，按需填写参数：
    - `android_version` / `kernel_version` / `sub_level` / `os_patch_level`
-   - `ksu_variant`：KernelSU 变体（FinaSU）
+| 🔐 KernelSU | 已集成 FinaSU |
+
    - 功能开关：`enable_susfs`、`use_zram`、`use_bbg`、`use_net_enhance`、`use_kpm`、`skip_incompatible` 等 
 4. 构建完成后，在本次运行页面下载 **Artifacts**：
    - `AnyKernel3.zip` —— 卡刷包（推荐，配合自定义 Recovery 或 KSU 刷入）

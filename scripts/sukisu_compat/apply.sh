@@ -6,11 +6,7 @@
 #      security_add_hooks(hooks, count, "ksu") 注册 LSM 钩子，
 #      6.8+ 内核要求 (hooks, count, const struct lsm_id *)，
 #      android16-6.12 GKI 编译报 -Wincompatible-pointer-types（-Werror）；
-#   2) <kpm>/super_access.c 引用 netlink_kernel_cfg.cb_mutex，
-#      该成员在 Linux 6.11 被上游移除，KPM 开启时 6.11+ 内核编译失败
-#      （上游 2026-10-19 重构后该文件由 kernel/kpm/ 迁至
-#        kernel/extension/kpm/，本脚本按实际路径定位，不再写死）；
-#   3) builtin 在 app 启动路径对管理器/授权应用 disable_seccomp()，
+#   2) builtin 在 app 启动路径对管理器/授权应用 disable_seccomp()，
 #      管理器首页 "Seccomp 状态" 显示"未启用"；改为对齐 main 分支/BakaSU
 #      的过滤模式（保留 seccomp 过滤器 + action cache 放行 reboot）。
 #
@@ -21,6 +17,9 @@
 #   - supercall.h 的 KSU_IOCTL_KPM 笔误 / KSU_IOCTL_MANAGER 缺声明：
 #     上游已把 KPM / MANAGER 等并入统一的 KSU_IOCTL_EXTENSION，旧常量不复存在
 #   - throne_tracker 的 crown_manager 裸 return / pkg 作用域：上游已修正
+#   - netlink_kernel_cfg.cb_mutex（Linux 6.11 移除）：上游已改为构建期探测
+#     目标 netlink.h 并定义 KSU_NETLINK_CFG_HAS_CB_MUTEX，super_access.c
+#     以 #ifdef 守卫该成员（main: kernel/Kbuild / builtin: kernel/Makefile）
 #
 # 修复均以内容检测守卫，上游自行修复后自动跳过，重复执行幂等。
 #
@@ -61,36 +60,6 @@ if [ -f "$LSM_FILE" ] && grep -q 'security_add_hooks(ksu_hooks, ARRAY_SIZE(ksu_h
   fi
 else
   echo "lsm_hook.c 不存在或无需 lsm_id 兼容补丁，跳过"
-fi
-
-# 位置随上游重构迁移过（kernel/kpm/ -> kernel/extension/kpm/），按实际路径定位，
-# 避免守卫路径写死导致补丁静默跳过（6.12 会因此直接编译失败）
-SUPER_REL=""
-for cand in kernel/extension/kpm/super_access.c kernel/kpm/super_access.c; do
-  if [ -f "$KSU_DIR/$cand" ]; then
-    SUPER_REL="$cand"
-    break
-  fi
-done
-if [ -z "$SUPER_REL" ] && [ -d "$KSU_DIR/kernel" ]; then
-  SUPER_REL="$(cd "$KSU_DIR" && find kernel -type f -name super_access.c -path '*kpm*' 2>/dev/null | head -n 1)"
-fi
-
-if [ -n "$SUPER_REL" ] && grep -q 'DEFINE_MEMBER(netlink_kernel_cfg, cb_mutex)' "$KSU_DIR/$SUPER_REL"; then
-  if grep -q 'KERNEL_VERSION(6, 11, 0)' "$KSU_DIR/$SUPER_REL"; then
-    echo "$SUPER_REL 已包含 cb_mutex 版本守卫，跳过"
-  else
-    echo "应用 cb_mutex 兼容补丁 (6.11+ 移除 netlink_kernel_cfg.cb_mutex, 目标 $SUPER_REL)..."
-    # 补丁头固定为旧路径 kernel/kpm/，这里改写为实际路径后应用
-    sed -e "s|kernel/kpm/super_access.c|$SUPER_REL|g" "$COMPAT_DIR/sukisu-cb-mutex-6.11.patch" \
-      | patch -p1 --forward -d "$KSU_DIR" \
-      || fail "cb_mutex 兼容补丁应用失败（SukiSU 上游代码可能已变化）"
-    grep -q 'KERNEL_VERSION(6, 11, 0)' "$KSU_DIR/$SUPER_REL" \
-      || fail "cb_mutex 兼容补丁应用后校验失败"
-    echo "$SUPER_REL: 6.11+ 已跳过 cb_mutex 成员"
-  fi
-else
-  echo "未找到 kpm/super_access.c 或无需 cb_mutex 兼容补丁，跳过"
 fi
 
 # ---- Seccomp 过滤模式（builtin 分支）----
@@ -135,6 +104,36 @@ if [ -f "$LSM_FILE" ] && grep -q 'handle_zygote_setresuid' "$LSM_FILE"; then
   fi
 else
   echo "lsm_hook.c 无 builtin setresuid 路径（main 分支已内置过滤模式），跳过 seccomp 过滤模式补丁"
+fi
+
+# ---- clang fall-through annotation ----
+# builtin 的 policy/allowlist.c 使用注释形式 fall-through；bazel GKI
+# 构建开启 -Werror,-Wimplicit-fallthrough 时会直接报错。改用内核
+# fallthrough 宏（展开为 __attribute__((__fallthrough__))），上游修复后自动跳过。
+if grep -rqF '/* fall through */' "$KSU_DIR/kernel" 2>/dev/null; then
+  echo "修正 SukiSU 源码的注释式 fall-through（bazel -Werror 兼容）..."
+  python3 - "$KSU_DIR" <<'PYEOF'
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1]) / "kernel"
+for path in sorted(root.rglob("*.c")):
+    text = path.read_text(encoding="utf-8", errors="surrogateescape")
+    if "/* fall through */" not in text:
+        continue
+    path.write_text(
+        text.replace("/* fall through */", "fallthrough;"),
+        encoding="utf-8",
+        errors="surrogateescape",
+    )
+    print(f"  {path}")
+PYEOF
+  if grep -rqF '/* fall through */' "$KSU_DIR/kernel" 2>/dev/null; then
+    fail "fall-through 注解修正后仍有残留"
+  fi
+  echo "fall-through 注解修正完成"
+else
+  echo "SukiSU 源码无注释式 fall-through，跳过"
 fi
 
 echo "SukiSU API 兼容补丁处理完成"

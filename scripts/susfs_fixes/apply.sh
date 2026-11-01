@@ -44,8 +44,8 @@ verify_finasu_native_susfs() {
       || { echo "::error::FinaSU Kconfig 缺少 config $OPT（上游结构可能已变化）" >&2; exit 1; }
   done
 
-  # extension/susfs.c 提供 50_add 主补丁在 fs/exec.c 内联调用的全部入口点；
-  # ksu_susfs_hooks.py 靠源码探测这些符号，缺失时会静默退化，这里提前校验
+  # extension/susfs.c 提供 50_add 主补丁在 fs/exec.c 内联调用的全部入口点，缺失会在
+  # vmlinux 链接阶段报 undefined symbol，这里提前校验
   for SYM in ksu_handle_execveat ksu_handle_execveat_sucompat ksu_handle_post_execveat_sucompat \
              ksu_setup_preinit_file ksu_preinit_handle_post_execveat; do
     grep -qE "^(int|void) $SYM\(" "$FINASU_KSU/extension/susfs.c" \
@@ -244,20 +244,6 @@ echo "归一化 SUSFS 头文件上下文"
 python3 "$SCRIPT_DIR/normalize_trace_ctx.py" "$SUSFS_PATCH"
 
 patch -p1 < "$SUSFS_PATCH" || true
-
-# ==================== KernelSU 缺失的 SUSFS 内联钩子符号（6.6+/6.12 主补丁形态）====================
-# 6.6/6.12 主补丁在 security/selinux/{hooks,selinuxfs}.c 内联改写调用点，要求 KernelSU 侧
-# 以全局符号提供 my_setprocattr / my_write_context / my_write_access；并在 fs/exec.c 调用
-# ksu_setup_preinit_file / ksu_preinit_handle_post_execveat（受 KSU_NO_PREINIT 开关控制）。
-# SukiSU-Ultra（builtin 5ef32ad / main 31255c4）两者都不提供，KPM+SUSFS 的 6.12 构建在
-# vmlinux 链接阶段报：
-#   ld.lld: error: undefined symbol: my_setprocattr / my_write_context / my_write_access
-#   ld.lld: error: undefined symbol: ksu_setup_preinit_file / ksu_preinit_handle_post_execveat
-# 处理：按 KernelSU 实际能力裁剪（SELinux 包装函数回落到内核原生处理函数、preinit 走主补丁
-# 自带开关），保留 SUSFS 其余功能；KernelSU 上游补齐后脚本按内容检测自动跳过，幂等。
-echo "按 KernelSU 实际能力裁剪 SUSFS 内联钩子..."
-python3 "$SCRIPT_DIR/ksu_susfs_hooks.py" "$KERNEL_ROOT" \
-  || { echo "::error::SUSFS 内联钩子裁剪失败"; exit 1; }
 
 # ==================== FinaSU 新 selinux_hide 模型适配 ====================
 # 自 FinaSU v0.1.0-preview1 起，kernel/feature/selinux_hide.c 换成了 tiann 新形态：

@@ -106,7 +106,7 @@ on:
           - "185 (2025-07)"
           - "189 (2025-09)"
           - "194 (2025-12)"
-          - "lts (5.15.220)"
+          - "lts (5.15.223)"
       sub_level_6_1:
         description: "6.1 子版本 (选择后自动匹配安全补丁级别；仅内核版本为 6.1 时生效)"
         required: false
@@ -146,7 +146,7 @@ on:
           - "162 (2026-03)"
           - "172 (2026-06)"
           - "176 (2026-09)"
-          - "lts (6.1.177)"
+          - "lts (6.1.182)"
       sub_level_6_6:
         description: "6.6 子版本 (选择后自动匹配安全补丁级别；仅内核版本为 6.6 时生效)"
         required: false
@@ -187,7 +187,7 @@ on:
           - "69 (2026-03)"
           - "81 (2026-06)"
           - "92 (2026-09)"
-          - "lts (6.12.96)"
+          - "lts (6.12.97)"
 
       # ==================== KernelSU 配置 ====================
       kernelsu_variant:
@@ -198,13 +198,22 @@ on:
           - FinaSU
         default: FinaSU
 
+      build_channel:
+        description: "构建通道（正式=官方 Release 发行版，最新=上游最新提交）"
+        required: false
+        type: choice
+        options:
+          - "正式 (Release)"
+          - "最新 (HEAD)"
+        default: "正式 (Release)"
+
       # ==================== 可选配置 ====================
       version:
         description: "自定义版本名 (可选)"
         required: false
         type: string
       build_time:
-        description: "自定义构建时间 (留空=自动获取当前北京时间) (示例 Sun Dec  1 08:10:00 UTC 2026)"
+        description: "自定义构建时间 (留空=自动获取当前北京时间) (示例 Tue Dec  1 08:10:00 UTC 2026)"
         required: false
         type: string
         default: ""
@@ -255,7 +264,7 @@ on:
         type: boolean
         default: false
       use_net_enhance:
-        description: "启用 网络增强 (IPSet + BBR)"
+        description: "启用 网络增强 (BBRv3 + IPSet + Qdisc + CIFS)"
         required: true
         type: boolean
         default: false
@@ -402,6 +411,7 @@ jobs:
       os_patch_level: ${{ needs.resolve-version.outputs.os_patch_level }}
       revision: "r1"
       ksu_variant: ${{ inputs.kernelsu_variant }}
+      build_channel: ${{ inputs.build_channel }}
       # 内核侧 KernelSU 检出到官方最新上传 Manager 构建的同一提交，
       # 使内核 KSU 版本与拉取的管理器安装包严格一致（BakaSU / FinaSU 生效）
       ksu_commit: ${{ needs.get-ksu-manager.outputs.ksuCommit }}
@@ -428,3 +438,4 @@ jobs:
     secrets: inherit
     with:
       kernelsu_variant: ${{ inputs.kernelsu_variant }}
+      build_channel: ${{ inputs.build_channel }}

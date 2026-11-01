@@ -9,6 +9,11 @@ on:
       kernelsu_variant:
         required: true
         type: string
+      build_channel:
+        description: "构建通道：正式 (Release) 对齐官方发行版；最新 (HEAD) 跟随上游最新提交"
+        required: false
+        type: string
+        default: "正式 (Release)"
     outputs:
       susVer:
         description: "The fetched SUSFS version number"
@@ -19,12 +24,16 @@ on:
         value: ${{ jobs.get_ksu_manager.outputs.ksuVer }}
 
       managerVer:
-        description: "官方最新上传 Manager 构建的实测版本号"
+        description: "官方 Manager 构建的实测版本号"
         value: ${{ jobs.get_ksu_manager.outputs.managerVer }}
 
       ksuCommit:
-        description: "官方最新上传 Manager 构建对应的提交 SHA（内核侧对齐用）"
+        description: "内核侧对齐用的提交 SHA（正式通道=Release 标签提交；最新通道=所选 CI 构建提交或 HEAD）"
         value: ${{ jobs.get_ksu_manager.outputs.ksuCommit }}
+
+      channelTag:
+        description: "正式通道选用的 Release 标签（最新通道或回退时为空）"
+        value: ${{ jobs.get_ksu_manager.outputs.channelTag }}
 
       managerCertSize:
         description: "FinaSU 管理器签名证书 DER 尺寸（0x 十六进制，内核第二信任槽对齐用）"
@@ -44,9 +53,11 @@ jobs:
       susVer: ${{ steps.get_version.outputs.sversion }}
       # 输出3: Manager 实测版本号
       managerVer: ${{ steps.add_KSU.outputs.managerVer }}
-      # 输出4: 官方最新上传构建的提交 SHA（内核侧对齐用）
+      # 输出4: 内核侧对齐用的提交 SHA（正式通道=Release 标签提交；最新通道=空）
       ksuCommit: ${{ steps.add_KSU.outputs.ksuCommit }}
-      # 输出5/6: FinaSU 管理器签名证书（内核第二信任槽对齐用）
+      # 输出5: 正式通道选用的 Release 标签
+      channelTag: ${{ steps.add_KSU.outputs.channelTag }}
+      # 输出6/7: FinaSU 管理器签名证书（内核第二信任槽对齐用）
       managerCertSize: ${{ steps.add_KSU.outputs.managerCertSize }}
       managerCertHash: ${{ steps.add_KSU.outputs.managerCertHash }}
     env:
@@ -62,7 +73,7 @@ jobs:
       - name: 安装依赖
         run: |
           sudo apt-get update
-          sudo apt-get install -y git curl jq
+          sudo apt-get install -y git curl jq unzip
 
       - name: 获取 KSU & SUSFS 版本
         id: get_version
@@ -107,70 +118,245 @@ jobs:
           echo "kversion=$KSU_VERSION" >> $GITHUB_OUTPUT
           echo "sversion=$SUS_VERSION" >> $GITHUB_OUTPUT
 
+      # ==================== 构建通道 ====================
+      # 正式：管理器取官方「正式版」Release（prerelease=false，标签提交 + 该 Release 的 APK）；
+      #       上游没有正式版 Release 时（如 BakaSU 只有 rc 预发布），
+      #       改用官方默认分支最新上传构建，内核仍锁定该构建提交
+      # 最新：管理器取与默认分支 HEAD 版本一致的最新构建（不限分支），内核锁定该 HEAD；
+      #       FinaSU 取 build-manager.yml 最新构建，内核锁定该构建提交
+      - name: 选择管理器来源（构建通道）
+        id: channel
+        run: |
+
+          CHANNEL_RAW="${{ inputs.build_channel }}"
+          case "$CHANNEL_RAW" in
+            最新*|latest*|HEAD*) CHANNEL_KIND="latest"; PIN_MODE="head" ;;
+            *)                   CHANNEL_KIND="release"; PIN_MODE="pin" ;;
+          esac
+          echo "构建通道: $CHANNEL_RAW -> $CHANNEL_KIND (pin_mode=$PIN_MODE)"
+
+          case "${{ inputs.kernelsu_variant }}" in
+            "SukiSU") REPO="SukiSU-Ultra/SukiSU-Ultra"; PREF="universal" ;;
+            "BakaSU") REPO="Baka-SU/BakaSU";           PREF="arm64" ;;
+            "FinaSU") REPO="LyraVoid/FinaSU";          PREF="universal" ;;
+            *) echo "::error::未知变体"; exit 1 ;;
+          esac
+
+          {
+            echo "CHANNEL_KIND=$CHANNEL_KIND"
+            echo "PIN_MODE=$PIN_MODE"
+            echo "MANAGER_REPO=$REPO"
+            echo "MANAGER_SOURCE=ci"
+          } >> "$GITHUB_ENV"
+
+          if [ "$CHANNEL_KIND" != "release" ]; then
+            echo "最新通道：内核锁定默认分支 HEAD，管理器取与 HEAD 版本一致的最新构建"
+            exit 0
+          fi
+
+          # ---------- 正式通道：解析官方 Release ----------
+          REL_JSON=""
+          for ATTEMPT in 1 2 3; do
+            REL_JSON=$(curl -s --fail --max-time 30 \
+              -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/$REPO/releases?per_page=40") \
+              && [ -n "$REL_JSON" ] && break
+            echo "获取 $REPO 的 Release 列表失败，重试 ($ATTEMPT/3)..."
+            REL_JSON=""
+            sleep 5
+          done
+
+          # 选择规则：
+          #   1) 跳过草稿与滚动发布标签（manager-ci / nightly / latest 等，其内容始终是最新 CI 产物）
+          #   2) 只保留带 APK 资产的 Release（排除 debug / spoofed 包）
+          #   3) 只接受正式版（prerelease=false）：rc / beta 等预发布属于"最新"范畴，正式通道不取
+          #   4) ABI 偏好：BakaSU 取 arm64-v8a，其余优先 universal
+          PICK=""
+          if [ -n "$REL_JSON" ]; then
+            PICK=$(printf '%s' "$REL_JSON" | jq -r --arg pref "$PREF" '
+              [ .[] | select(.draft == false) ]
+              | map(. + { _ts: (.published_at // .created_at // "") })
+              | sort_by(._ts) | reverse
+              | map(. + {
+                  _rolling: (.tag_name | test("(?i)^(manager-ci|manager_ci|nightly|latest|ci)$")),
+                  _apks: [ .assets[]?
+                           | select(.name | test("\\.apk$"; "i"))
+                           | select(.name | test("(?i)debug|spoofed") | not) ]
+                })
+              | map(. + {
+                  _apks: (._apks | sort_by(
+                    if   (.name | test("(?i)" + $pref)) then 0
+                    elif (.name | test("(?i)universal")) then 1
+                    elif (.name | test("(?i)arm64")) then 2
+                    else 3 end))
+                })
+              | map(select((._rolling | not) and ((._apks | length) > 0)))
+              | map(select(.prerelease | not))
+              | .[0] as $p
+              | if $p then
+                  [ $p.tag_name, ( $p.prerelease | tostring ), $p._apks[0].name, $p._apks[0].browser_download_url ] | @tsv
+                else empty end
+            ')
+          fi
+
+          if [ -z "$PICK" ]; then
+            echo "::notice::$REPO 没有可用的正式版 Release（仅预发布或未附 APK），改用官方默认分支最新上传构建（内核仍锁定该提交）"
+            exit 0
+          fi
+
+          IFS=$'\t' read -r REL_TAG REL_PRE REL_APK_NAME REL_APK_URL <<< "$PICK"
+
+          # 解析 Release 标签对应的提交（优先本地克隆，回退远端查询）
+          REL_COMMIT=$(git -C KernelSU rev-parse "${REL_TAG}^{commit}" 2>/dev/null || true)
+          if [ -z "$REL_COMMIT" ]; then
+            # annotated tag 需解引用，否则拿到的是标签对象而非提交
+            REL_COMMIT=$(git ls-remote "https://github.com/$REPO.git" "refs/tags/${REL_TAG}^{}" 2>/dev/null | awk '{print $1}')
+          fi
+          if [ -z "$REL_COMMIT" ]; then
+            REL_COMMIT=$(git ls-remote "https://github.com/$REPO.git" "refs/tags/${REL_TAG}" 2>/dev/null | awk '{print $1}')
+          fi
+          if [ -z "$REL_COMMIT" ]; then
+            echo "::warning title=正式通道回退::无法解析 Release $REL_TAG 对应的提交，改用官方默认分支最新上传构建"
+            exit 0
+          fi
+
+          {
+            echo "MANAGER_SOURCE=release"
+            echo "REL_TAG=$REL_TAG"
+            echo "REL_COMMIT=$REL_COMMIT"
+            echo "REL_APK_NAME=$REL_APK_NAME"
+            echo "REL_APK_URL=$REL_APK_URL"
+          } >> "$GITHUB_ENV"
+
+          if [ "$REL_PRE" = "true" ]; then
+            echo "::notice::上游无正式版，选用最新预发布版 $REL_TAG"
+          fi
+          echo "正式通道：Release $REL_TAG (${REL_COMMIT:0:8})，管理器 $REL_APK_NAME"
+
       - name: 添加 KernelSU
         id: add_KSU
         continue-on-error: true
         run: |
-          if [ "${{ inputs.kernelsu_variant }}" == "SukiSU" ]; then
-            echo "SukiSU..."
-            REPO="SukiSU-Ultra/SukiSU-Ultra"
-            KSUM="manager"
-            EXPECTED_BRANCH="main"
-          elif [ "${{ inputs.kernelsu_variant }}" == "BakaSU" ]; then
-            echo "BakaSU..."
-            REPO="Baka-SU/BakaSU"
-            KSUM="manager"
-            EXPECTED_BRANCH="main"
-          elif [ "${{ inputs.kernelsu_variant }}" == "FinaSU" ]; then
-            echo "FinaSU..."
-            REPO="LyraVoid/FinaSU"
-            KSUM="manager"
-            EXPECTED_BRANCH="master"
+          VARIANT="${{ inputs.kernelsu_variant }}"
+
+          case "$VARIANT" in
+            "SukiSU") REPO="SukiSU-Ultra/SukiSU-Ultra"; KSUM="manager"; EXPECTED_BRANCH="main" ;;
+            "BakaSU") REPO="Baka-SU/BakaSU";           KSUM="manager"; EXPECTED_BRANCH="main" ;;
+            "FinaSU") REPO="LyraVoid/FinaSU";          KSUM="manager"; EXPECTED_BRANCH="master" ;;
+            *) echo "::error::未知变体: $VARIANT"; exit 1 ;;
+          esac
+
+          # 通道兜底解析（选择步骤异常时仍能按输入判断）
+          CHANNEL_KIND="${CHANNEL_KIND:-}"
+          if [ -z "$CHANNEL_KIND" ]; then
+            case "${{ inputs.build_channel }}" in
+              最新*|latest*|HEAD*) CHANNEL_KIND="latest" ;;
+              *)                   CHANNEL_KIND="release" ;;
+            esac
           fi
 
-          FILENAME="build-manager.yml"
+          mkdir -p manager-artifacts
 
-          if [ "${{ inputs.kernelsu_variant }}" == "FinaSU" ]; then
-            # FinaSU 只使用官方 GitHub Releases：
-            #   1) 管理器 = 最新 Release 的 APK（不拉取 CI 构建产物）
-            #   2) 内核 = 该 Release tag 对应的提交（build.yml 检出 ksuCommit）
-            # 两者同源同值（Kbuild 与管理器 versionCode 均为 30000 + 提交数），
-            # 证书直接取自该 Release APK，保证与实际分发的管理器严格一致。
-            echo "获取 FinaSU 最新 Release..."
+          # ==================== A. 正式通道：官方 Release 管理器 ====================
+          if [ "${MANAGER_SOURCE:-ci}" = "release" ] && [ -n "${REL_APK_URL:-}" ]; then
+            echo "正式通道：下载 Release $REL_TAG 的管理器（$REL_APK_NAME）..."
+            REL_APK="manager-artifacts/$(basename "$REL_APK_NAME")"
+            if curl -sL --fail --retry 3 --max-time 300 -o "$REL_APK" "$REL_APK_URL"; then
+              # 先剥离 ABI 段再提取版本，避免 x86_64 的 "_64" 等数字尾巴被误当成 versionCode
+              CLEAN_NAME=$(basename "$REL_APK" | sed -E 's/-(arm64-v8a|armeabi-v7a|armv7|riscv64|x86_64|x86|universal)-release\.apk$/.apk/')
+              MANAGER_VERSION=$(echo "$CLEAN_NAME" | grep -oE '_[0-9]+' | tail -n 1 | tr -d '_')
+              if [[ "${MANAGER_VERSION:-}" =~ ^[0-9]+$ ]]; then
+                echo "Release 管理器版本: $MANAGER_VERSION（标签 $REL_TAG，提交 ${REL_COMMIT:0:8}）"
+                echo "MANAGER_VERSION=$MANAGER_VERSION" >> $GITHUB_ENV
+                {
+                  echo "managerVer=$MANAGER_VERSION"
+                  echo "ksuCommit=$REL_COMMIT"
+                  echo "channelTag=$REL_TAG"
+                } >> $GITHUB_OUTPUT
+
+                # 版本一致性自检：Release 标签提交对应的 KSU 版本应与管理器 versionCode 相同
+                REL_COUNT=$(git -C KernelSU rev-list --count "$REL_COMMIT" 2>/dev/null || echo "")
+                if [ -n "$REL_COUNT" ]; then
+                  case "$VARIANT" in
+                    SukiSU) REL_KSU_VERSION=$((40000 + REL_COUNT - 2815)) ;;
+                    BakaSU) REL_KSU_VERSION=$((30700 + REL_COUNT)) ;;
+                    FinaSU) REL_KSU_VERSION=$((30000 + REL_COUNT)) ;;
+                  esac
+                  if [ "$MANAGER_VERSION" != "$REL_KSU_VERSION" ]; then
+                    echo "::warning::Release 管理器版本 $MANAGER_VERSION 与标签提交对应的 KSU 版本 $REL_KSU_VERSION 不一致"
+                  fi
+                fi
+
+                if [ "$VARIANT" == "FinaSU" ]; then
+                  echo "从 Release 管理器 APK 提取签名证书..."
+                  CERT_INFO=$(python3 "$GITHUB_WORKSPACE/scripts/finasu_compat/extract_manager_cert.py" "$REL_APK" | head -n1)
+                  if [ -n "$CERT_INFO" ]; then
+                    CERT_SIZE=$(echo "$CERT_INFO" | awk '{print $1}')
+                    CERT_HASH=$(echo "$CERT_INFO" | awk '{print $2}')
+                    echo "managerCertSize=$CERT_SIZE" >> $GITHUB_OUTPUT
+                    echo "managerCertHash=$CERT_HASH" >> $GITHUB_OUTPUT
+                    echo "Release 管理器证书 size=$CERT_SIZE sha256=$CERT_HASH"
+                  else
+                    echo "::warning title=证书缺失::无法从 Release 管理器 APK 提取签名证书，内核侧将回退提取"
+                  fi
+                fi
+                exit 0
+              fi
+              echo "::warning title=正式通道回退::无法从 Release 管理器文件名解析版本（$(basename "$REL_APK")），回退到最新通道"
+            else
+              echo "::warning title=正式通道回退::Release 管理器下载失败，回退到最新通道"
+            fi
+            rm -rf manager-artifacts && mkdir -p manager-artifacts
+          fi
+
+          # ==================== B. FinaSU：正式通道 Release 管理器 ====================
+          if [ "$VARIANT" == "FinaSU" ] && [ "${PIN_MODE:-pin}" != "head" ]; then
+            # 正式通道（含正式 Release 不可用时的回退）：
+            #   管理器/证书取最新 Release APK，内核锁定 Release 标签提交
+            #   最新通道改走下方 build-manager.yml 的 CI 管理器产物
+            echo "FinaSU：管理器取最新 Release APK..."
             REL_JSON=""
             for ATTEMPT in 1 2 3; do
-              REL_JSON=$(curl -s --fail --max-time 30                 -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}"                 "https://api.github.com/repos/LyraVoid/FinaSU/releases/latest")                 && [ -n "$REL_JSON" ] && break
+              REL_JSON=$(curl -s --fail --max-time 30 \
+                -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+                "https://api.github.com/repos/LyraVoid/FinaSU/releases/latest") \
+                && [ -n "$REL_JSON" ] && break
               echo "获取 Release 信息失败，重试 ($ATTEMPT/3)..."
+              REL_JSON=""
               sleep 5
             done
             if [ -z "$REL_JSON" ]; then
-              echo "::warning::无法获取 FinaSU 最新 Release 信息，本次跳过管理器与证书对齐（内核回退 master + Release APK 证书）"
+              echo "::warning::无法获取 FinaSU 最新 Release 信息，本次跳过管理器与证书对齐（内核跟随 master）"
+              echo "ksuCommit=" >> $GITHUB_OUTPUT
               exit 0
             fi
             REL_TAG=$(printf '%s' "$REL_JSON" | jq -r '.tag_name')
             REL_APK_URL=$(printf '%s' "$REL_JSON" | jq -r '.assets[] | select(.name | endswith(".apk")) | .browser_download_url' | head -n1)
-            REL_COMMIT=$(curl -s --fail --max-time 30               -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}"               "https://api.github.com/repos/LyraVoid/FinaSU/commits/$REL_TAG" | jq -r '.sha')
-            if [ -z "$REL_APK_URL" ] || [ "$REL_APK_URL" = "null" ] || [ -z "$REL_COMMIT" ] || [ "$REL_COMMIT" = "null" ]; then
-              echo "::warning::Release $REL_TAG 中没有 APK 资产或无法解析提交，本次跳过管理器与证书对齐"
+            if [ -z "$REL_APK_URL" ] || [ "$REL_APK_URL" = "null" ]; then
+              echo "::warning::Release $REL_TAG 中没有 APK 资产，本次跳过管理器与证书对齐"
+              echo "ksuCommit=" >> $GITHUB_OUTPUT
               exit 0
             fi
-            echo "下载 Release 管理器: $REL_TAG ($REL_COMMIT)"
-            mkdir -p manager-artifacts
+            echo "下载 Release 管理器: $REL_TAG"
             REL_APK="manager-artifacts/$(basename "$REL_APK_URL")"
-            curl -sL --fail --retry 3 --max-time 300 -o "$REL_APK" "$REL_APK_URL" || {
+            if ! curl -sL --fail --retry 3 --max-time 300 -o "$REL_APK" "$REL_APK_URL"; then
               echo "::warning::下载 Release 管理器失败，本次跳过管理器与证书对齐"
+              echo "ksuCommit=" >> $GITHUB_OUTPUT
               exit 0
-            }
+            fi
             CLEAN_NAME=$(basename "$REL_APK" | sed -E 's/-(arm64-v8a|armeabi-v7a|armv7|riscv64|x86_64|x86|universal)-release\.apk$/.apk/')
             MANAGER_VERSION=$(echo "$CLEAN_NAME" | grep -oE '_[0-9]+' | tail -n 1 | tr -d '_')
-            if ! [[ "$MANAGER_VERSION" =~ ^[0-9]+$ ]]; then
+            if ! [[ "${MANAGER_VERSION:-}" =~ ^[0-9]+$ ]]; then
               echo "::warning::无法从 Release APK 文件名解析版本 ($(basename "$REL_APK"))，本次跳过管理器与证书对齐"
+              echo "ksuCommit=" >> $GITHUB_OUTPUT
               exit 0
             fi
             echo "从 Release 管理器 APK 提取签名证书..."
             CERT_INFO=$(python3 "$GITHUB_WORKSPACE/scripts/finasu_compat/extract_manager_cert.py" "$REL_APK" | head -n1)
             if [ -z "$CERT_INFO" ]; then
               echo "::warning::未能从 Release 管理器 APK 提取签名证书，内核侧将回退 Release APK 证书提取"
+              echo "ksuCommit=" >> $GITHUB_OUTPUT
               exit 0
             fi
             CERT_SIZE=$(echo "$CERT_INFO" | awk '{print $1}')
@@ -178,15 +364,30 @@ jobs:
             echo "Release: $REL_TAG, 管理器版本 $MANAGER_VERSION, 证书 size=$CERT_SIZE sha256=$CERT_HASH"
             echo "MANAGER_VERSION=$MANAGER_VERSION" >> $GITHUB_ENV
             echo "managerVer=$MANAGER_VERSION" >> $GITHUB_OUTPUT
-            echo "ksuCommit=$REL_COMMIT" >> $GITHUB_OUTPUT
             echo "managerCertSize=$CERT_SIZE" >> $GITHUB_OUTPUT
             echo "managerCertHash=$CERT_HASH" >> $GITHUB_OUTPUT
+            # 最新：锁定 master HEAD（内核按该提交构建）；正式：锁定 Release 标签提交
+            if [ "${PIN_MODE:-pin}" = "head" ]; then
+              FINASU_REF=$(git -C KernelSU rev-parse "origin/master^{commit}" 2>/dev/null \
+                || git ls-remote https://github.com/LyraVoid/FinaSU.git refs/heads/master 2>/dev/null | awk '{print $1}')
+            else
+              FINASU_REF=$(git -C KernelSU rev-parse "${REL_TAG}^{commit}" 2>/dev/null \
+                || git ls-remote https://github.com/LyraVoid/FinaSU.git "refs/tags/${REL_TAG}^{}" 2>/dev/null | awk '{print $1}')
+            fi
+            echo "内核锁定提交: ${FINASU_REF:0:8}"
+            echo "ksuCommit=$FINASU_REF" >> $GITHUB_OUTPUT
             exit 0
           fi
 
+          # ---------- 最新通道：官方 CI 构建的管理器（SukiSU / BakaSU / FinaSU） ----------
           get_manager_artifacts() {
             local artifacts="$1"
-            if [ "${{ inputs.kernelsu_variant }}" == "BakaSU" ]; then
+            if [ "$VARIANT" == "FinaSU" ]; then
+              # build-manager.yml 的正式分发产物固定为 manager；
+              # manager-gradle 是未重签的中间产物，证书与内核第二信任槽不一致。
+              printf '%s' "$artifacts" | jq -r \
+                '.artifacts[] | select(.name == "manager") | "\(.name)\t\(.archive_download_url)"'
+            elif [ "$VARIANT" == "BakaSU" ]; then
               printf '%s' "$artifacts" | jq -r \
                 '.artifacts[] | select(.name == "Manager-release" or .name == "Spoofed-Manager-release") | "\(.name)\t\(.archive_download_url)"'
             else
@@ -195,10 +396,42 @@ jobs:
             fi
           }
 
-          # 仿 BakaSU_CI：只拉取官方 main 分支最新上传（push）的 Manager 构建，
+          # 版本号与管理器 versionCode 同源（提交数 + 偏移），用于按版本挑选构建
+          ksu_version_of() {
+            case "$1" in
+              SukiSU) echo $((40000 + $2 - 2815)) ;;
+              BakaSU) echo $((30700 + $2)) ;;
+              FinaSU) echo $((30000 + $2)) ;;
+            esac
+          }
+
+          # 最新通道：先锁定默认分支 HEAD，再把管理器限定为「版本与该 HEAD 一致」的构建，
+          # 避免出现内核 35249 / 管理器 35248 这种版本错位。
+          # FinaSU 例外：直接取 build-manager.yml 的最新构建，内核锁定该构建提交。
+          HEAD_SHA=""
+          HEAD_VERSION=""
+          if [ "${PIN_MODE:-pin}" = "head" ] && [ "$VARIANT" != "FinaSU" ]; then
+            HEAD_SHA=$(git -C KernelSU rev-parse "origin/${EXPECTED_BRANCH}^{commit}" 2>/dev/null || true)
+            if [ -z "$HEAD_SHA" ]; then
+              HEAD_SHA=$(git ls-remote "https://github.com/$REPO.git" "refs/heads/$EXPECTED_BRANCH" 2>/dev/null | awk '{print $1}')
+            fi
+            if [ -n "$HEAD_SHA" ]; then
+              git -C KernelSU cat-file -e "${HEAD_SHA}^{commit}" 2>/dev/null || git -C KernelSU fetch -q origin "$HEAD_SHA" 2>/dev/null || true
+              HEAD_COUNT=$(git -C KernelSU rev-list --count "$HEAD_SHA" 2>/dev/null || echo "")
+              if [ -n "$HEAD_COUNT" ]; then
+                HEAD_VERSION=$(ksu_version_of "$VARIANT" "$HEAD_COUNT")
+              fi
+              echo "最新通道：$EXPECTED_BRANCH HEAD ${HEAD_SHA:0:8} 对应 KSU 版本 ${HEAD_VERSION:-未知}"
+            else
+              echo "::warning::无法解析 $EXPECTED_BRANCH HEAD，管理器按最新构建选择"
+            fi
+          fi
+
+          # 仿 BakaSU_CI：只拉取官方默认分支最新上传（push）的 Manager 构建，
           # 并以下载到的 APK 文件名实测 versionCode 命名，确保包名与包内容严格一致
           # 注意：runs 列表 API 的排序/缓存在部分仓库不可靠（可能漏掉最新构建），
           # 而 created 日期过滤参数走可靠查询路径，因此按日期窗口从今天往回推进检索
+          FILENAME="build-manager.yml"
           RUNS_BASE="https://api.github.com/repos/$REPO/actions/workflows/$FILENAME/runs?status=success"
           CAND_FILE=$(mktemp)
           TODAY=$(date -u +%Y-%m-%d)
@@ -209,7 +442,7 @@ jobs:
             else
               FROM=$(date -u -d "today - $DAYS days" +%Y-%m-%d)
             fi
-            echo "检索 $FROM ~ $TODAY 期间官方 $EXPECTED_BRANCH 分支构建..."
+            echo "检索 $FROM ~ $TODAY 期间的 Manager 构建..."
             for PAGE in 1 2 3; do
               RUNS=""
               for ATTEMPT in 1 2 3; do
@@ -225,18 +458,24 @@ jobs:
               fi
               for INDEX in $(seq 0 $((RUN_COUNT - 1))); do
                 BUILD_ID=$(printf '%s' "$RUNS" | jq -r ".workflow_runs[$INDEX].id")
-                HEAD_SHA=$(printf '%s' "$RUNS" | jq -r ".workflow_runs[$INDEX].head_sha")
-                HEAD_BRANCH=$(printf '%s' "$RUNS" | jq -r ".workflow_runs[$INDEX].head_branch")
+                CAND_SHA=$(printf '%s' "$RUNS" | jq -r ".workflow_runs[$INDEX].head_sha")
+                CAND_BRANCH=$(printf '%s' "$RUNS" | jq -r ".workflow_runs[$INDEX].head_branch")
                 EVENT=$(printf '%s' "$RUNS" | jq -r ".workflow_runs[$INDEX].event")
                 CREATED=$(printf '%s' "$RUNS" | jq -r ".workflow_runs[$INDEX].created_at")
-                # 认领官方默认分支上传的构建（push 与 workflow_dispatch 均可，
+                # 正式通道：只认官方默认分支上传的构建（push 与 workflow_dispatch 均可，
                 # 手动触发常用于正式上传前测试），跳过 PR / 其他分支构建
                 #（SukiSU/BakaSU 为 main，FinaSU 为 master）
-                if [ "$HEAD_BRANCH" != "$EXPECTED_BRANCH" ] || { [ "$EVENT" != "push" ] && [ "$EVENT" != "workflow_dispatch" ]; }; then
-                  echo "跳过构建 $BUILD_ID ($HEAD_BRANCH/$EVENT): 非官方 $EXPECTED_BRANCH 分支构建"
+                # 最新通道：接受任意分支的构建（跳过 PR 构建），再按版本与 HEAD 匹配排序
+                if [ "${PIN_MODE:-pin}" = "head" ]; then
+                  if [ "$EVENT" != "push" ] && [ "$EVENT" != "workflow_dispatch" ]; then
+                    echo "跳过构建 $BUILD_ID ($CAND_BRANCH/$EVENT): 非 push/手动触发构建"
+                    continue
+                  fi
+                elif [ "$CAND_BRANCH" != "$EXPECTED_BRANCH" ] || { [ "$EVENT" != "push" ] && [ "$EVENT" != "workflow_dispatch" ]; }; then
+                  echo "跳过构建 $BUILD_ID ($CAND_BRANCH/$EVENT): 非官方 $EXPECTED_BRANCH 分支构建"
                   continue
                 fi
-                printf '%s\t%s\t%s\n' "$CREATED" "$BUILD_ID" "$HEAD_SHA" >> "$CAND_FILE"
+                printf '%s\t%s\t%s\t%s\n' "$CREATED" "$BUILD_ID" "$CAND_SHA" "$CAND_BRANCH" >> "$CAND_FILE"
               done
             done
             if [ -s "$CAND_FILE" ]; then
@@ -246,23 +485,72 @@ jobs:
 
           if [ ! -s "$CAND_FILE" ]; then
             rm -f "$CAND_FILE"
-            echo "未找到官方 $EXPECTED_BRANCH 分支上传的 Manager 构建。"
+            echo "未找到可用的 Manager 构建。"
+            echo "ksuCommit=" >> $GITHUB_OUTPUT
             exit 1
           fi
-          # sort -u 去重（窗口扩大后会重复收集），按创建时间降序（最新优先）
-          CAND_COUNT=$(sort -u -t$'\t' -k1,1r "$CAND_FILE" | wc -l)
-          echo "共找到 $CAND_COUNT 个官方 $EXPECTED_BRANCH 分支构建，从最新开始逐个下载（以 APK 文件名实测版本）..."
 
-          while IFS=$'\t' read -r CREATED BUILD_ID HEAD_SHA; do
+          # 去重后排序：
+          #   正式 → 默认分支构建按时间倒序
+          #   最新 → 优先「版本与 HEAD 一致」的构建，其次默认分支，最后其他分支（同组按时间倒序）
+          CAND_UNIQ=$(mktemp)
+          sort -u -t$'\t' -k2,2 "$CAND_FILE" > "$CAND_UNIQ"
+          rm -f "$CAND_FILE"
+
+          PREF_SHA=""
+          if [ "${PIN_MODE:-pin}" = "head" ] && [ -n "$HEAD_VERSION" ]; then
+            while IFS=$'\t' read -r CREATED BUILD_ID CAND_SHA CAND_BRANCH; do
+              if [ "$CAND_SHA" = "$HEAD_SHA" ]; then
+                PREF_SHA="$CAND_SHA"
+                break
+              fi
+              git -C KernelSU cat-file -e "${CAND_SHA}^{commit}" 2>/dev/null \
+                || git -C KernelSU fetch -q origin "$CAND_SHA" 2>/dev/null \
+                || continue
+              CAND_COUNT=$(git -C KernelSU rev-list --count "$CAND_SHA" 2>/dev/null || echo "")
+              [ -n "$CAND_COUNT" ] || continue
+              if [ "$(ksu_version_of "$VARIANT" "$CAND_COUNT")" = "$HEAD_VERSION" ]; then
+                PREF_SHA="$CAND_SHA"
+                break
+              fi
+            done < <(sort -t$'\t' -k1,1r "$CAND_UNIQ" | head -n 40)
+            if [ -n "$PREF_SHA" ]; then
+              echo "优先选择与 HEAD 版本 $HEAD_VERSION 一致的构建提交 ${PREF_SHA:0:8}"
+            fi
+          fi
+
+          ORDERED_FILE=$(mktemp)
+          if [ "$VARIANT" == "FinaSU" ]; then
+            # 最新通道：严格按构建时间倒序，取 build-manager.yml 最新成功构建
+            sort -t$'\t' -k1,1r "$CAND_UNIQ" \
+              | awk -F'\t' '{ print "0\t" $0 }' > "$ORDERED_FILE"
+          else
+            # 候选行格式：创建时间 \t 构建ID \t 提交 \t 分支（优先级在 awk 里补在第 1 列）
+            sort -t$'\t' -k1,1r "$CAND_UNIQ" \
+              | awk -F'\t' -v pref="$PREF_SHA" -v br="$EXPECTED_BRANCH" \
+                  '{ p = (pref != "" && $3 == pref) ? 0 : ($4 == br ? 1 : 2); print p "\t" $0 }' \
+              | sort -t$'\t' -k1,1n -k2,2r > "$ORDERED_FILE"
+          fi
+          rm -f "$CAND_UNIQ"
+
+          CAND_COUNT=$(wc -l < "$ORDERED_FILE")
+          echo "共找到 $CAND_COUNT 个可用构建，按优先级逐个尝试（以 APK 文件名实测版本）..."
+
+          MANAGER_VERSION=""
+          MANAGER_BUILD_ID=""
+          MANAGER_HEAD_SHA=""
+          MANAGER_BRANCH=""
+          MANAGER_APK=""
+          while IFS=$'\t' read -r PRIO CREATED BUILD_ID CAND_SHA CAND_BRANCH; do
             ARTIFACTS=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
               "https://api.github.com/repos/$REPO/actions/runs/$BUILD_ID/artifacts")
             CANDIDATE_LIST=$(get_manager_artifacts "$ARTIFACTS")
             if [ -z "$CANDIDATE_LIST" ]; then
-              echo "跳过构建 $BUILD_ID ($EXPECTED_BRANCH, $CREATED): 未找到包含 '$KSUM' 的产物"
+              echo "跳过构建 $BUILD_ID ($CAND_BRANCH, $CREATED): 未找到包含 '$KSUM' 的产物"
               continue
             fi
 
-            echo "下载构建 $BUILD_ID ($EXPECTED_BRANCH, $CREATED, ${HEAD_SHA:0:8}) 的产物..."
+            echo "下载构建 $BUILD_ID ($CAND_BRANCH, $CREATED, ${CAND_SHA:0:8}) 的产物..."
             rm -rf manager-artifacts
             mkdir -p manager-artifacts
             while IFS=$'\t' read -r NAME URL; do
@@ -284,55 +572,87 @@ jobs:
               APK_FILE=$(find manager-artifacts -type f -name "*release.apk" ! -name "*debug*" | head -n 1)
             fi
             if [ -z "$APK_FILE" ]; then
-              echo "跳过构建 $BUILD_ID ($EXPECTED_BRANCH, $CREATED): artifact 中无 release APK"
+              echo "跳过构建 $BUILD_ID ($CAND_BRANCH, $CREATED): artifact 中无 release APK"
               continue
             fi
             # 先剥离 ABI 段再提取版本，避免 x86_64 的 "_64" 等数字尾巴被误当成 versionCode
             CLEAN_NAME=$(basename "$APK_FILE" | sed -E 's/-(arm64-v8a|armeabi-v7a|armv7|riscv64|x86_64|x86|universal)-release\.apk$/.apk/')
             ACTUAL_VERSION=$(echo "$CLEAN_NAME" | grep -oE '_[0-9]+' | tail -n 1 | tr -d '_')
             if ! [[ "$ACTUAL_VERSION" =~ ^[0-9]+$ ]]; then
-              echo "跳过构建 $BUILD_ID ($EXPECTED_BRANCH, $CREATED): 无法从 APK 文件名解析版本 ($(basename "$APK_FILE"))"
+              echo "跳过构建 $BUILD_ID ($CAND_BRANCH, $CREATED): 无法从 APK 文件名解析版本 ($(basename "$APK_FILE"))"
               continue
             fi
 
             MANAGER_VERSION="$ACTUAL_VERSION"
             MANAGER_BUILD_ID="$BUILD_ID"
-            MANAGER_HEAD_SHA="$HEAD_SHA"
+            MANAGER_HEAD_SHA="$CAND_SHA"
+            MANAGER_BRANCH="$CAND_BRANCH"
+            MANAGER_APK="$APK_FILE"
             break
-          done < <(sort -u -t$'\t' -k1,1r "$CAND_FILE")
-          rm -f "$CAND_FILE"
+          done < "$ORDERED_FILE"
+          rm -f "$ORDERED_FILE"
 
           if [ -z "$MANAGER_VERSION" ]; then
-            echo "未获取到官方 $EXPECTED_BRANCH 分支最新上传的 Manager artifact。"
+            echo "未获取到可用的 Manager artifact。"
+            echo "ksuCommit=" >> $GITHUB_OUTPUT
             exit 1
           fi
-          echo "选择 Manager 构建 $MANAGER_BUILD_ID ($EXPECTED_BRANCH, ${MANAGER_HEAD_SHA:0:8}), APK 实测版本 $MANAGER_VERSION"
-          # 内核侧将对齐到该构建的同一提交（BakaSU/FinaSU：直接检出；SukiSU：改写版本来源 REPO_BRANCH），
-          # 因此对比"该提交对应的 KSU 版本"而非默认分支 HEAD 的版本
+          echo "选择 Manager 构建 $MANAGER_BUILD_ID ($MANAGER_BRANCH, ${MANAGER_HEAD_SHA:0:8}), APK 实测版本 $MANAGER_VERSION"
+          # 内核提交锁定策略：
+          #   正式 → 锁定该构建提交（版本与管理器严格一致）
+          #   最新 → 锁定选择时刻的默认分支 HEAD（管理器已按该版本匹配，二者一致）
           PIN_COUNT=$(git -C KernelSU rev-list --count "$MANAGER_HEAD_SHA" 2>/dev/null || echo "")
           if [ -n "$PIN_COUNT" ]; then
-            case "${{ inputs.kernelsu_variant }}" in
+            case "$VARIANT" in
               BakaSU) PINNED_KSU_VERSION=$((30700 + PIN_COUNT)) ;;
               SukiSU) PINNED_KSU_VERSION=$((40000 + PIN_COUNT - 2815)) ;;
               FinaSU) PINNED_KSU_VERSION=$((30000 + PIN_COUNT)) ;;
               *)      PINNED_KSU_VERSION="" ;;
             esac
             if [ -n "$PINNED_KSU_VERSION" ]; then
-              echo "内核 KSU 版本将对齐官方构建提交 ${MANAGER_HEAD_SHA:0:8}: $PINNED_KSU_VERSION"
+              echo "管理器构建提交 ${MANAGER_HEAD_SHA:0:8} 对应 KSU 版本: $PINNED_KSU_VERSION"
               if [ "$MANAGER_VERSION" != "$PINNED_KSU_VERSION" ]; then
-                echo "::warning::Manager 实测版本 $MANAGER_VERSION 与官方构建提交对应的 KSU 版本 $PINNED_KSU_VERSION 不一致"
+                echo "::warning::Manager 实测版本 $MANAGER_VERSION 与构建提交对应的 KSU 版本 $PINNED_KSU_VERSION 不一致"
               fi
             elif [ -n "${KSU_VERSION:-}" ] && [ "$MANAGER_VERSION" != "$KSU_VERSION" ]; then
               echo "::warning::Manager 实测版本 $MANAGER_VERSION 与内核 KSU 版本 ${KSU_VERSION} 不一致"
             fi
           elif [ -n "${KSU_VERSION:-}" ] && [ "$MANAGER_VERSION" != "$KSU_VERSION" ]; then
-            echo "::warning::Manager 实测版本 $MANAGER_VERSION 与内核 KSU 版本 ${KSU_VERSION} 不一致（无法计算官方构建提交对应的版本）"
+            echo "::warning::Manager 实测版本 $MANAGER_VERSION 与内核 KSU 版本 ${KSU_VERSION} 不一致（无法计算构建提交对应的版本）"
           fi
           echo "MANAGER_VERSION=$MANAGER_VERSION" >> $GITHUB_ENV
           echo "managerVer=$MANAGER_VERSION" >> $GITHUB_OUTPUT
-          echo "ksuCommit=$MANAGER_HEAD_SHA" >> $GITHUB_OUTPUT
 
-          if [ "${{ inputs.kernelsu_variant }}" == "BakaSU" ]; then
+          if [ "$VARIANT" == "FinaSU" ]; then
+            echo "从 CI 管理器 APK 提取签名证书..."
+            CERT_INFO=$(python3 "$GITHUB_WORKSPACE/scripts/finasu_compat/extract_manager_cert.py" "$MANAGER_APK" | head -n1)
+            if [ -n "$CERT_INFO" ]; then
+              CERT_SIZE=$(echo "$CERT_INFO" | awk '{print $1}')
+              CERT_HASH=$(echo "$CERT_INFO" | awk '{print $2}')
+              echo "managerCertSize=$CERT_SIZE" >> $GITHUB_OUTPUT
+              echo "managerCertHash=$CERT_HASH" >> $GITHUB_OUTPUT
+              echo "CI 管理器证书 size=$CERT_SIZE sha256=$CERT_HASH"
+            else
+              echo "::warning title=证书缺失::无法从 CI 管理器 APK 提取签名证书，内核侧将回退 Release APK 证书提取"
+            fi
+          fi
+
+          if [ "${PIN_MODE:-pin}" = "head" ] && [ -n "$HEAD_SHA" ] && [ "$VARIANT" != "FinaSU" ]; then
+            if [ -n "$HEAD_VERSION" ] && [ "$MANAGER_VERSION" != "$HEAD_VERSION" ]; then
+              echo "::warning::最新通道：未找到与 $EXPECTED_BRANCH HEAD 版本 $HEAD_VERSION 一致的管理器，回退到 $MANAGER_VERSION"
+            fi
+            echo "最新通道：内核锁定 $EXPECTED_BRANCH HEAD ${HEAD_SHA:0:8}，管理器版本 $MANAGER_VERSION"
+            echo "ksuCommit=$HEAD_SHA" >> $GITHUB_OUTPUT
+          else
+            if [ "$VARIANT" == "FinaSU" ]; then
+              echo "最新通道：内核锁定 build-manager 构建提交 ${MANAGER_HEAD_SHA:0:8}，管理器版本 $MANAGER_VERSION"
+            else
+              echo "内核锁定构建提交 ${MANAGER_HEAD_SHA:0:8}，管理器版本 $MANAGER_VERSION"
+            fi
+            echo "ksuCommit=$MANAGER_HEAD_SHA" >> $GITHUB_OUTPUT
+          fi
+
+          if [ "$VARIANT" == "BakaSU" ]; then
             echo "仅保留 BakaSU arm64-v8a release 管理器..."
             find manager-artifacts -type f -name "*.apk" ! -name "*-arm64-v8a-release.apk" -delete
             find manager-artifacts -type f -name "*debug*.apk" -delete
@@ -343,7 +663,6 @@ jobs:
             find manager-artifacts -type f -name "*.apk" -print
           fi
 
-          # FinaSU 已在上面的 Release 分支提前退出，不会走到 CI 产物流程。
       - name: 添加 SUSFS 模块
         id: add_SUSFS
         continue-on-error: true
@@ -392,6 +711,26 @@ jobs:
       - name: Notify on failure
         if: steps.add_KSU.outcome == 'failure'
         run: echo "下载CI构建的KSU失败!"
+
+      - name: 构建通道摘要
+        if: always()
+        run: |
+          {
+            echo "### 构建通道"
+            echo ""
+            echo "- 选择通道：${{ inputs.build_channel }}"
+            echo "- 实际通道：${CHANNEL_KIND:-未知}（pin_mode=${PIN_MODE:-未知}）"
+            echo "- 管理器来源：${MANAGER_SOURCE:-ci}"
+            if [ "${MANAGER_SOURCE:-ci}" = "release" ]; then
+              echo "- Release 标签：${REL_TAG:-未知}"
+              echo "- 内核对齐提交：${REL_COMMIT:0:8}"
+            elif [ "${CHANNEL_KIND:-}" = "latest" ]; then
+              echo "- 内核锁定：上游默认分支 HEAD ${HEAD_SHA:0:8}（管理器按该版本匹配）"
+            else
+              echo "- 内核锁定：官方默认分支最新上传构建${MANAGER_HEAD_SHA:+ }${MANAGER_HEAD_SHA:0:8}"
+            fi
+            echo "- 管理器版本：${{ steps.add_KSU.outputs.managerVer }}"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: 上传APK
         if: steps.add_KSU.outcome == 'success'
