@@ -15,10 +15,6 @@ on:
         type: string
         default: "正式 (Release)"
     outputs:
-      susVer:
-        description: "The fetched SUSFS version number"
-        value: ${{ jobs.get_ksu_manager.outputs.susVer }}
-
       ksuVer:
         description: "The calculated KSU version number"
         value: ${{ jobs.get_ksu_manager.outputs.ksuVer }}
@@ -49,15 +45,13 @@ jobs:
     outputs:
       # 输出1: KSU版本号
       ksuVer: ${{ steps.get_version.outputs.kversion }}
-      # 输出2: SUSFS版本号
-      susVer: ${{ steps.get_version.outputs.sversion }}
-      # 输出3: Manager 实测版本号
+      # 输出2: Manager 实测版本号
       managerVer: ${{ steps.add_KSU.outputs.managerVer }}
-      # 输出4: 内核侧对齐用的提交 SHA（正式通道=Release 标签提交；最新通道=空）
+      # 输出3: 内核侧对齐用的提交 SHA（正式通道=Release 标签提交；最新通道=空）
       ksuCommit: ${{ steps.add_KSU.outputs.ksuCommit }}
-      # 输出5: 正式通道选用的 Release 标签
+      # 输出4: 正式通道选用的 Release 标签
       channelTag: ${{ steps.add_KSU.outputs.channelTag }}
-      # 输出6/7: FinaSU 管理器签名证书（内核第二信任槽对齐用）
+      # 输出5/6: FinaSU 管理器签名证书（内核第二信任槽对齐用）
       managerCertSize: ${{ steps.add_KSU.outputs.managerCertSize }}
       managerCertHash: ${{ steps.add_KSU.outputs.managerCertHash }}
     env:
@@ -109,14 +103,13 @@ jobs:
           echo $KSU_VERSION
           echo "KSU_VERSION=$KSU_VERSION" >> $GITHUB_ENV
 
-          # 计算SUSFS版本号
-          INFO="https://gitlab.com/simonpunk/susfs4ksu/-/raw/gki-android14-6.1/ksu_module_susfs/module.prop"
-          SUS_VERSION=$(curl -s $INFO | awk -F '=' '$1 == "version" { print $2 }')
-          echo $SUS_VERSION
+          # SUSFS 版本不再在此处检测。不同 Android/内核版本使用不同的 SUSFS 分支，
+          # 且可能被 config/config 锁定到具体 commit；固定读取单一上游分支会导致
+          # Release 元数据与实际参与构建的源码不一致。现在由各构建任务在实际 checkout
+          # 后从 module.prop 读取，并通过 Job Output 传给 Release。
 
-          # 导出这两个值给release
+          # 导出这个值给release
           echo "kversion=$KSU_VERSION" >> $GITHUB_OUTPUT
-          echo "sversion=$SUS_VERSION" >> $GITHUB_OUTPUT
 
       # ==================== 构建通道 ====================
       # 正式：管理器取官方「正式版」Release（prerelease=false，标签提交 + 该 Release 的 APK）；

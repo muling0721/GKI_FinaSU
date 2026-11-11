@@ -459,10 +459,63 @@ jobs:
           if [ -z "$KSU_VER" ]; then
             KSU_VER="${{ needs.get-manager.outputs.ksuVer }}"
           fi
-          SUS_VER="${{ needs.get-manager.outputs.susVer }}"
           echo "KSU_VER=$KSU_VER" >> $GITHUB_ENV
-          echo "SUS_VER=$SUS_VER" >> $GITHUB_ENV
 
+          # ==================== SUSFS 版本 ====================
+          # 版本只能来自各构建任务「实际检出」的源码（构建任务在应用 config/config 的
+          # commit 锁定后从 module.prop 读取并导出 Job Output），不再固定读取
+          # gki-android14-6.1，也不按分支名推断或跨分支套用。
+          SUSFS_LABELS=()
+          SUSFS_VERSIONS=()
+          add_susfs_build() {
+            local selected="$1" label="$2" version="$3"
+            [[ "$selected" == "true" ]] || return 0
+            SUSFS_LABELS+=("$label")
+            SUSFS_VERSIONS+=("$version")
+          }
+          add_susfs_build "${{ inputs.build_a12_5_10 || inputs.build_all }}" "Android 12 / 5.10" "${{ needs.build-a12-5-10.outputs.susfsVersion }}"
+          add_susfs_build "${{ inputs.build_a13_5_15 || inputs.build_all }}" "Android 13 / 5.15" "${{ needs.build-a13-5-15.outputs.susfsVersion }}"
+          add_susfs_build "${{ inputs.build_a14_6_1 || inputs.build_all }}" "Android 14 / 6.1" "${{ needs.build-a14-6-1.outputs.susfsVersion }}"
+          add_susfs_build "${{ inputs.build_a15_6_6 || inputs.build_all }}" "Android 15 / 6.6" "${{ needs.build-a15-6-6.outputs.susfsVersion }}"
+          add_susfs_build "${{ inputs.build_a16_6_12 || inputs.build_all }}" "Android 16 / 6.12" "${{ needs.build-a16-6-12.outputs.susfsVersion }}"
+
+          # SUS_VER：显示用版本（各构建目标版本不同时用 " / " 连接，不做合并假设）
+          # SUS_VERSION：标签基准版本（取第一个已检出构建的版本，保证标签稳定）
+          SUS_VER=""
+          SUS_VERSION=""
+          declare -A SUS_VERSION_SEEN=()
+          for idx in "${!SUSFS_LABELS[@]}"; do
+            version="${SUSFS_VERSIONS[$idx]}"
+            [[ -n "$version" ]] || continue
+            if [[ -z "$SUS_VERSION" ]]; then
+              SUS_VERSION="$version"
+            fi
+            if [[ -z "${SUS_VERSION_SEEN[$version]:-}" ]]; then
+              SUS_VERSION_SEEN[$version]=1
+              if [[ -z "$SUS_VER" ]]; then
+                SUS_VER="$version"
+              else
+                SUS_VER="$SUS_VER / $version"
+              fi
+            fi
+          done
+
+          if [[ -z "$SUS_VERSION" ]]; then
+            if [[ "${{ inputs.cancel_susfs }}" == "true" ]]; then
+              echo "SUSFS 已禁用（cancel_susfs=true），Release 不展示 SUSFS 版本"
+              SUS_VER="未启用"
+            elif [[ ${#SUSFS_LABELS[@]} -eq 0 ]]; then
+              # 没有任何构建目标被选中：沿用旧行为的回退版本，不阻断发布
+              echo "::warning title=未选择构建目标::未选择任何构建目标，SUSFS 版本回退为默认值"
+              SUS_VER="未启用"
+            else
+              echo "::error title=SUSFS 版本缺失::SUSFS 已启用，但没有收到任何构建任务导出的版本号（构建任务失败或未运行），拒绝生成空版本 Release"
+              exit 1
+            fi
+          fi
+          echo "SUS_VER=$SUS_VER" >> $GITHUB_ENV
+          echo "SUS_VERSION=$SUS_VERSION" >> $GITHUB_ENV
+          echo "本次构建 SUSFS 版本: ${SUS_VER:-未知}"
           # 功能开关显示
           echo "LZ4_STATUS=${{ inputs.use_zram && '开启' || '未开启' }}" >> $GITHUB_ENV
           echo "BBG_STATUS=${{ inputs.use_bbg && '开启' || '未开启' }}" >> $GITHUB_ENV
@@ -590,28 +643,53 @@ jobs:
           echo "KSU_REF=$KSU_REF" >> $GITHUB_ENV
           echo "KSU_URL=$KSU_URL" >> $GITHUB_ENV
 
-      # ==================== 获取 SUSFS 提交信息 ====================
-      # 获取各版本 SUSFS 的 Git 提交信息
-      - name: 获取 SUSFS 提交信息
+      # ==================== 汇总 SUSFS 元数据 ====================
+      # 只使用各构建任务从「实际检出源码」导出的 Job Output；不再按固定分支
+      # 向上游发请求（那会忽略 config/config 的 commit 锁定与 SukiSU 镜像回退）
+      - name: 汇总 SUSFS 提交信息
         run: |
-          GITLAB_OWNER="simonpunk"
-          GITLAB_REPO="susfs4ksu"
-          declare -A BRANCH_MAP=(
-            ["gki_android12_5_10"]="gki-android12-5.10"
-            ["gki_android13_5_15"]="gki-android13-5.15"
-            ["gki_android14_6_1"]="gki-android14-6.1"
-            ["gki_android15_6_6"]="gki-android15-6.6"
-            ["gki_android16_6_12"]="gki-android16-6.12"
-          )
-          for var_name in "${!BRANCH_MAP[@]}"; do
-            branch_name="${BRANCH_MAP[$var_name]}"
-            COMMIT_HASH=$(git ls-remote https://gitlab.com/$GITLAB_OWNER/$GITLAB_REPO.git refs/heads/$branch_name | awk '{ print $1 }')
-            if [[ -n "$COMMIT_HASH" ]]; then
-              COMMIT_URL="https://gitlab.com/$GITLAB_OWNER/$GITLAB_REPO/-/commit/$COMMIT_HASH"
-              echo "COMMIT_HASH_${var_name}=$COMMIT_HASH" >> "$GITHUB_ENV"
-              echo "COMMIT_URL_${var_name}=$COMMIT_URL" >> "$GITHUB_ENV"
+          : > susfs_commits.md
+          : > susfs_table.md
+
+          append_susfs_info() {
+            local selected="$1" label="$2" branch="$3" version="$4" commit="$5" source="$6"
+            [[ "$selected" == "true" ]] || return 0
+
+            if [[ -z "$commit" ]]; then
+              printf -- '- %s: 未获取到构建任务导出的 SUSFS 元数据\n' "$label" >> susfs_commits.md
+              printf -- '| %s | %s | - | - |\n' "$label" "${version:-未获取}" >> susfs_table.md
+              return 0
             fi
-          done
+
+            local url
+            case "$source" in
+              *gitlab.com*)  url="https://gitlab.com/simonpunk/susfs4ksu/-/commit/$commit" ;;
+              *ShirkNeko*)   url="https://github.com/ShirkNeko/susfs4ksu/commit/$commit" ;;
+              *)             url="$source" ;;
+            esac
+
+            printf -- '- %s: [`%s`](%s) - %s（`%s`）\n' "$label" "${commit:0:7}" "$url" "${version:-未知版本}" "$branch" >> susfs_commits.md
+            printf -- '| %s | `%s` | `%s` | %s |\n' "$label" "${version:-未获取}" "${commit:0:7}" "$source" >> susfs_table.md
+          }
+
+          append_susfs_info "${{ inputs.build_a12_5_10 || inputs.build_all }}" "Android 12 / 5.10" "${{ needs.build-a12-5-10.outputs.susfsBranch }}" "${{ needs.build-a12-5-10.outputs.susfsVersion }}" "${{ needs.build-a12-5-10.outputs.susfsCommit }}" "${{ needs.build-a12-5-10.outputs.susfsSource }}"
+          append_susfs_info "${{ inputs.build_a13_5_15 || inputs.build_all }}" "Android 13 / 5.15" "${{ needs.build-a13-5-15.outputs.susfsBranch }}" "${{ needs.build-a13-5-15.outputs.susfsVersion }}" "${{ needs.build-a13-5-15.outputs.susfsCommit }}" "${{ needs.build-a13-5-15.outputs.susfsSource }}"
+          append_susfs_info "${{ inputs.build_a14_6_1 || inputs.build_all }}" "Android 14 / 6.1" "${{ needs.build-a14-6-1.outputs.susfsBranch }}" "${{ needs.build-a14-6-1.outputs.susfsVersion }}" "${{ needs.build-a14-6-1.outputs.susfsCommit }}" "${{ needs.build-a14-6-1.outputs.susfsSource }}"
+          append_susfs_info "${{ inputs.build_a15_6_6 || inputs.build_all }}" "Android 15 / 6.6" "${{ needs.build-a15-6-6.outputs.susfsBranch }}" "${{ needs.build-a15-6-6.outputs.susfsVersion }}" "${{ needs.build-a15-6-6.outputs.susfsCommit }}" "${{ needs.build-a15-6-6.outputs.susfsSource }}"
+          append_susfs_info "${{ inputs.build_a16_6_12 || inputs.build_all }}" "Android 16 / 6.12" "${{ needs.build-a16-6-12.outputs.susfsBranch }}" "${{ needs.build-a16-6-12.outputs.susfsVersion }}" "${{ needs.build-a16-6-12.outputs.susfsCommit }}" "${{ needs.build-a16-6-12.outputs.susfsSource }}"
+
+          if [[ ! -s susfs_commits.md ]]; then
+            if [[ "${{ inputs.cancel_susfs }}" == "true" ]]; then
+              echo "- SUSFS 已禁用（cancel_susfs=true）" > susfs_commits.md
+            else
+              echo "- 未获取到本次构建对应的 SUSFS 提交信息" > susfs_commits.md
+            fi
+          fi
+          if [[ ! -s susfs_table.md ]]; then
+            echo '| - | 未启用 | - | - |' > susfs_table.md
+          fi
+
+          cat susfs_table.md
 
       # ==================== 生成发布说明 ====================
       # 创建包含详细信息的发布说明文档
@@ -644,22 +722,6 @@ jobs:
             build_targets="未选择"
           fi
 
-          : > susfs_commits.md
-          append_susfs_commit() {
-            local selected="$1" label="$2" hash="$3" url="$4"
-            if [[ "$selected" == "true" && -n "$hash" && -n "$url" ]]; then
-              printf -- '- %s: [`%s`](%s)\n' "$label" "${hash:0:7}" "$url" >> susfs_commits.md
-            fi
-          }
-          append_susfs_commit "${{ inputs.build_a12_5_10 || inputs.build_all }}" "Android 12 / 5.10" "${COMMIT_HASH_gki_android12_5_10}" "${COMMIT_URL_gki_android12_5_10}"
-          append_susfs_commit "${{ inputs.build_a13_5_15 || inputs.build_all }}" "Android 13 / 5.15" "${COMMIT_HASH_gki_android13_5_15}" "${COMMIT_URL_gki_android13_5_15}"
-          append_susfs_commit "${{ inputs.build_a14_6_1 || inputs.build_all }}" "Android 14 / 6.1" "${COMMIT_HASH_gki_android14_6_1}" "${COMMIT_URL_gki_android14_6_1}"
-          append_susfs_commit "${{ inputs.build_a15_6_6 || inputs.build_all }}" "Android 15 / 6.6" "${COMMIT_HASH_gki_android15_6_6}" "${COMMIT_URL_gki_android15_6_6}"
-          append_susfs_commit "${{ inputs.build_a16_6_12 || inputs.build_all }}" "Android 16 / 6.12" "${COMMIT_HASH_gki_android16_6_12}" "${COMMIT_URL_gki_android16_6_12}"
-          if [[ ! -s susfs_commits.md ]]; then
-            echo "- 未获取到本次构建对应的 SUSFS 提交信息" > susfs_commits.md
-          fi
-
           cat > release_body.md << EOF
           ## GKI Kernel Release
 
@@ -689,6 +751,12 @@ jobs:
           | Re-Kernel 驱动 | $REKERNEL_STATUS |
           | KPM | $KPM_STATUS |
           | Droidspaces 容器支持 | $DROIDSPACES_STATUS |
+
+          ### SUSFS 源码（本次构建实际使用）
+
+          | 构建目标 | 版本 | 提交 | 来源 |
+          |:---|:---|:---|:---|
+          $(cat susfs_table.md)
 
           ### 下载说明
 
@@ -744,10 +812,15 @@ jobs:
       # 根据 SUSFS 版本生成递增的发布标签
       - name: 生成版本标签
         run: |
-          # 获取 SUSFS 版本，如果 get-manager 被跳过则使用默认值
-          SUS_VERSION="${{ needs.get-manager.outputs.susVer }}"
+          # SUS_VERSION 由「设置显示名称」步骤从各构建任务实际检出的源码导出；
+          # 仅在 SUSFS 被禁用（或所有目标都未构建）时才回退到默认基准版本
+          SUS_VERSION="${SUS_VERSION:-}"
           if [ -z "$SUS_VERSION" ]; then
-            echo "警告: 未获取到 SUSFS 版本，使用默认版本号"
+            if [ "${{ inputs.cancel_susfs }}" == "true" ]; then
+              echo "SUSFS 已禁用，标签基准版本回退为 1.0.0"
+            else
+              echo "警告: 未获取到 SUSFS 版本，使用默认版本号"
+            fi
             SUS_VERSION="1.0.0"
           fi
 
