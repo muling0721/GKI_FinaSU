@@ -12,14 +12,25 @@
 # ================================================================
 
 # 是否启用自定义提交 (true/false)
-custom=false
+custom=true
 
 # ==================== SUSFS 各分支的 commit hash ====================
 # 仅当 custom=true 时生效
-# 统一锁定到 2026-10-29 的快照（各分支当日最后一个提交，均为
-# "KernelSU: Fix compiler error"），避免上游后续漂移导致补丁上下文失配。
-gki-android12-5.10=8930474a298d07ab9f1beca926779cbc3656b79e
-gki-android13-5.15=e30f1502a870434150efb16bd4a0d33277d7da57
-gki-android14-6.1=ee155a1ad4219804a7c54cb39dd4fa1b5c2a3fa4
-gki-android15-6.6=93114563fd6b08092b9ce8c0309738c921ac8bd1
-gki-android16-6.12=6b60a305d418148bd311f4fc9bddedc82d99e1fc
+# 统一锁定到 2026-11-09 22:16:14 +0800 的快照（各分支该时刻及之前的
+# 最后一个提交，均为 "KernelSU: Sync with upstream"）。
+#
+# 选点依据：
+#   1. 全部 5 个分支在该提交上的 ksu_module_susfs/module.prop 均为
+#      version=v2.4.0 / versionCode=204000，锁定后 Release 显示的版本
+#      与构建源码严格一致；
+#   2. 该快照晚于上游 "Bump version to 2.4.0"（2026-11-08），可避免
+#      跌回到旧版本，同时不跟随之后的漂移，降低补丁上下文失配风险。
+#
+# 注：gki-android14-6.1 分支当天的最后一个提交为 22:13:58 +0800（仍早于
+# 上述时间点）；gki-android16-6.12 在上游 GitHub 镜像中无对应分支，仍由
+# GitLab 源提供。
+gki-android12-5.10=5436438b5cc77f146e04f71070da153dabe17a9d
+gki-android13-5.15=fe943d15ec6a1891f7a360bf210589bdffe4e318
+gki-android14-6.1=69b8e734920b8f9ed885ab8d112969719698e242
+gki-android15-6.6=ec03d0c73b821afa1d5037d6d493216f59744fcb
+gki-android16-6.12=395a8c0c88d348e9fe7c14f66a456fde4653287c
