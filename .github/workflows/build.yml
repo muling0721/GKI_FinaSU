@@ -121,6 +121,15 @@ jobs:
     runs-on: ubuntu-latest
     # repo sync 重试（3 x 20 分钟）+ 完整构建需要 60 分钟以上的余量
     timeout-minutes: 90
+    # 暴露本次构建「实际检出」的 SUSFS 元数据，供 Release 生成使用。
+    # 同一构建任务内所有矩阵项共用同一 SUSFS 分支/提交，取值一致，
+    # GitHub Actions 取最后完成的矩阵项输出，不会出现版本错配。
+    outputs:
+      susfsBranch: ${{ steps.susfs_info.outputs.branch }}
+      susfsSource: ${{ steps.susfs_info.outputs.source }}
+      susfsCommit: ${{ steps.susfs_info.outputs.commit }}
+      susfsCommitDate: ${{ steps.susfs_info.outputs.commit_date }}
+      susfsVersion: ${{ steps.susfs_info.outputs.version }}
 
     env:
       CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
@@ -271,6 +280,7 @@ jobs:
           git config --global http.lowSpeedTime 180
 
       - name: 克隆依赖仓库
+        id: susfs_info
         run: |
           ANYKERNEL_BRANCH="gki-2.0"
           SUSFS_BRANCH="gki-${{ inputs.android_version }}-${{ inputs.kernel_version }}"
@@ -280,13 +290,18 @@ jobs:
           rm -rf AnyKernel3/.git
 
           echo "克隆 SUSFS (分支: $SUSFS_BRANCH)..."
+          SUSFS_SOURCE=""
           if [ "${{ inputs.ksu_variant }}" == "SukiSU" ]; then
-            if ! git clone https://github.com/ShirkNeko/susfs4ksu.git -b "$SUSFS_BRANCH" 2>/dev/null; then
+            if git clone https://github.com/ShirkNeko/susfs4ksu.git -b "$SUSFS_BRANCH" 2>/dev/null; then
+              SUSFS_SOURCE="https://github.com/ShirkNeko/susfs4ksu.git"
+            else
               echo "ShirkNeko 仓库未找到分支 $SUSFS_BRANCH，回退到 simonpunk 原版..."
               git clone https://gitlab.com/simonpunk/susfs4ksu.git -b "$SUSFS_BRANCH"
+              SUSFS_SOURCE="https://gitlab.com/simonpunk/susfs4ksu.git"
             fi
           else
             git clone https://gitlab.com/simonpunk/susfs4ksu.git -b "$SUSFS_BRANCH"
+            SUSFS_SOURCE="https://gitlab.com/simonpunk/susfs4ksu.git"
           fi
 
           CONFIG_FILE="config/config"
@@ -303,9 +318,74 @@ jobs:
             fi
           fi
 
+          # ==================== 锁定最终提交 ====================
+          # 必须在 config/config 的 commit 锁定之后再取值，确保记录的是实际参与构建的源码
+          SUSFS_COMMIT=$(git -C susfs4ksu rev-parse HEAD)
           SUSFS_LATEST_COMMIT_DATE=$(git -C susfs4ksu log -1 --date=format:'%Y-%m-%d %H:%M:%S %z' --format='%cd')
           echo "SUSFS_LATEST_COMMIT_DATE=$SUSFS_LATEST_COMMIT_DATE" >> $GITHUB_ENV
           echo "SUSFS 仓库最新提交日期: $SUSFS_LATEST_COMMIT_DATE"
+
+          # ==================== 读取 SUSFS 版本 ====================
+          # 版本只能来自本次实际检出的源码，禁止按分支名推断或用其他分支的版本代替
+          SUSFS_VERSION=""
+          if [ "${{ inputs.enable_susfs }}" == "true" ]; then
+            SUSFS_MODULE_PROP="$GITHUB_WORKSPACE/susfs4ksu/ksu_module_susfs/module.prop"
+            if [ ! -f "$SUSFS_MODULE_PROP" ]; then
+              echo "::error title=SUSFS 版本读取失败::未找到 $SUSFS_MODULE_PROP（分支 $SUSFS_BRANCH，来源 $SUSFS_SOURCE，提交 $SUSFS_COMMIT）"
+              exit 1
+            fi
+            SUSFS_VERSION=$(awk '
+              index($0, "version=") == 1 {
+                v = substr($0, length("version=") + 1)
+                gsub(/\r/, "", v)
+                gsub(/^[ \t]+|[ \t]+$/, "", v)
+                print v
+                exit
+              }
+            ' "$SUSFS_MODULE_PROP")
+            if [ -z "$SUSFS_VERSION" ]; then
+              echo "::error title=SUSFS 版本读取失败::$SUSFS_MODULE_PROP 中 version 字段缺失或为空（分支 $SUSFS_BRANCH，来源 $SUSFS_SOURCE，提交 $SUSFS_COMMIT）"
+              exit 1
+            fi
+          else
+            echo "SUSFS 未启用（enable_susfs=false），跳过版本读取"
+          fi
+
+          # 记录构建元数据：环境变量（日志/后续步骤） + Job Output（Release 使用）
+          {
+            echo "SUSFS_BRANCH=$SUSFS_BRANCH"
+            echo "SUSFS_SOURCE=$SUSFS_SOURCE"
+            echo "SUSFS_COMMIT=$SUSFS_COMMIT"
+            echo "SUSFS_VERSION=$SUSFS_VERSION"
+          } >> $GITHUB_ENV
+
+          {
+            echo "branch=$SUSFS_BRANCH"
+            echo "source=$SUSFS_SOURCE"
+            echo "commit=$SUSFS_COMMIT"
+            echo "commit_date=$SUSFS_LATEST_COMMIT_DATE"
+            echo "version=$SUSFS_VERSION"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "SUSFS 分支    : $SUSFS_BRANCH"
+          echo "SUSFS 来源    : $SUSFS_SOURCE"
+          echo "SUSFS 提交    : $SUSFS_COMMIT"
+          echo "SUSFS 版本    : ${SUSFS_VERSION:-未启用}"
+
+          if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+            {
+              echo ""
+              echo "### SUSFS 源码（本次构建实际检出）"
+              echo ""
+              echo "| 字段 | 值 |"
+              echo "|:---|:---|"
+              echo "| 分支 | \`$SUSFS_BRANCH\` |"
+              echo "| 来源 | $SUSFS_SOURCE |"
+              echo "| 提交 | \`$SUSFS_COMMIT\` |"
+              echo "| 提交日期 | $SUSFS_LATEST_COMMIT_DATE |"
+              echo "| 版本 | ${SUSFS_VERSION:-未启用} |"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
 
           echo "准备补丁资源..."
           git clone https://github.com/WildKernels/kernel_patches.git

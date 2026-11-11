@@ -178,6 +178,24 @@ on:
         type: string
         default: ""
 
+    # 把构建任务从实际检出源码读取到的 SUSFS 元数据透出给调用方（main.yml 的 Release）
+    outputs:
+      susfsBranch:
+        description: "本次构建实际使用的 SUSFS 分支"
+        value: ${{ jobs.build-kernels-a13-5-15.outputs.susfsBranch }}
+      susfsSource:
+        description: "本次构建实际使用的 SUSFS 源码仓库/镜像"
+        value: ${{ jobs.build-kernels-a13-5-15.outputs.susfsSource }}
+      susfsCommit:
+        description: "最终 checkout 的 SUSFS 完整 commit SHA"
+        value: ${{ jobs.build-kernels-a13-5-15.outputs.susfsCommit }}
+      susfsCommitDate:
+        description: "最终 checkout 的 SUSFS 提交日期"
+        value: ${{ jobs.build-kernels-a13-5-15.outputs.susfsCommitDate }}
+      susfsVersion:
+        description: "最终源码 module.prop 中的 SUSFS 版本"
+        value: ${{ jobs.build-kernels-a13-5-15.outputs.susfsVersion }}
+
 jobs:
   build-kernels-a13-5-15:
     name: "5.15.${{ matrix.display_sub || matrix.sub_level }}-${{ matrix.os_patch_level }}"
