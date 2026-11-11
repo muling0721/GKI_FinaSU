@@ -503,9 +503,11 @@ jobs:
           if [[ -z "$SUS_VERSION" ]]; then
             if [[ "${{ inputs.cancel_susfs }}" == "true" ]]; then
               echo "SUSFS 已禁用（cancel_susfs=true），Release 不展示 SUSFS 版本"
+              SUS_VER="未启用"
             elif [[ ${#SUSFS_LABELS[@]} -eq 0 ]]; then
               # 没有任何构建目标被选中：沿用旧行为的回退版本，不阻断发布
               echo "::warning title=未选择构建目标::未选择任何构建目标，SUSFS 版本回退为默认值"
+              SUS_VER="未启用"
             else
               echo "::error title=SUSFS 版本缺失::SUSFS 已启用，但没有收到任何构建任务导出的版本号（构建任务失败或未运行），拒绝生成空版本 Release"
               exit 1
@@ -513,7 +515,7 @@ jobs:
           fi
           echo "SUS_VER=$SUS_VER" >> $GITHUB_ENV
           echo "SUS_VERSION=$SUS_VERSION" >> $GITHUB_ENV
-          echo "本次构建 SUSFS 版本: ${SUS_VER:-未启用}"
+          echo "本次构建 SUSFS 版本: ${SUS_VER:-未知}"
           # 功能开关显示
           echo "LZ4_STATUS=${{ inputs.use_zram && '开启' || '未开启' }}" >> $GITHUB_ENV
           echo "BBG_STATUS=${{ inputs.use_bbg && '开启' || '未开启' }}" >> $GITHUB_ENV
