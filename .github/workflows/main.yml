@@ -461,61 +461,8 @@ jobs:
           fi
           echo "KSU_VER=$KSU_VER" >> $GITHUB_ENV
 
-          # ==================== SUSFS 版本 ====================
-          # 版本只能来自各构建任务「实际检出」的源码（构建任务在应用 config/config 的
-          # commit 锁定后从 module.prop 读取并导出 Job Output），不再固定读取
-          # gki-android14-6.1，也不按分支名推断或跨分支套用。
-          SUSFS_LABELS=()
-          SUSFS_VERSIONS=()
-          add_susfs_build() {
-            local selected="$1" label="$2" version="$3"
-            [[ "$selected" == "true" ]] || return 0
-            SUSFS_LABELS+=("$label")
-            SUSFS_VERSIONS+=("$version")
-          }
-          add_susfs_build "${{ inputs.build_a12_5_10 || inputs.build_all }}" "Android 12 / 5.10" "${{ needs.build-a12-5-10.outputs.susfsVersion }}"
-          add_susfs_build "${{ inputs.build_a13_5_15 || inputs.build_all }}" "Android 13 / 5.15" "${{ needs.build-a13-5-15.outputs.susfsVersion }}"
-          add_susfs_build "${{ inputs.build_a14_6_1 || inputs.build_all }}" "Android 14 / 6.1" "${{ needs.build-a14-6-1.outputs.susfsVersion }}"
-          add_susfs_build "${{ inputs.build_a15_6_6 || inputs.build_all }}" "Android 15 / 6.6" "${{ needs.build-a15-6-6.outputs.susfsVersion }}"
-          add_susfs_build "${{ inputs.build_a16_6_12 || inputs.build_all }}" "Android 16 / 6.12" "${{ needs.build-a16-6-12.outputs.susfsVersion }}"
-
-          # SUS_VER：显示用版本（各构建目标版本不同时用 " / " 连接，不做合并假设）
-          # SUS_VERSION：标签基准版本（取第一个已检出构建的版本，保证标签稳定）
-          SUS_VER=""
-          SUS_VERSION=""
-          declare -A SUS_VERSION_SEEN=()
-          for idx in "${!SUSFS_LABELS[@]}"; do
-            version="${SUSFS_VERSIONS[$idx]}"
-            [[ -n "$version" ]] || continue
-            if [[ -z "$SUS_VERSION" ]]; then
-              SUS_VERSION="$version"
-            fi
-            if [[ -z "${SUS_VERSION_SEEN[$version]:-}" ]]; then
-              SUS_VERSION_SEEN[$version]=1
-              if [[ -z "$SUS_VER" ]]; then
-                SUS_VER="$version"
-              else
-                SUS_VER="$SUS_VER / $version"
-              fi
-            fi
-          done
-
-          if [[ -z "$SUS_VERSION" ]]; then
-            if [[ "${{ inputs.cancel_susfs }}" == "true" ]]; then
-              echo "SUSFS 已禁用（cancel_susfs=true），Release 不展示 SUSFS 版本"
-              SUS_VER="未启用"
-            elif [[ ${#SUSFS_LABELS[@]} -eq 0 ]]; then
-              # 没有任何构建目标被选中：沿用旧行为的回退版本，不阻断发布
-              echo "::warning title=未选择构建目标::未选择任何构建目标，SUSFS 版本回退为默认值"
-              SUS_VER="未启用"
-            else
-              echo "::error title=SUSFS 版本缺失::SUSFS 已启用，但没有收到任何构建任务导出的版本号（构建任务失败或未运行），拒绝生成空版本 Release"
-              exit 1
-            fi
-          fi
-          echo "SUS_VER=$SUS_VER" >> $GITHUB_ENV
-          echo "SUS_VERSION=$SUS_VERSION" >> $GITHUB_ENV
-          echo "本次构建 SUSFS 版本: ${SUS_VER:-未知}"
+          # SUSFS 版本/提交不在这里算：它由各构建任务从实际检出的源码读取后
+          # 以 artifact（susfs-meta-*）上传，再由下游「汇总 SUSFS 元数据」步骤读取。
           # 功能开关显示
           echo "LZ4_STATUS=${{ inputs.use_zram && '开启' || '未开启' }}" >> $GITHUB_ENV
           echo "BBG_STATUS=${{ inputs.use_bbg && '开启' || '未开启' }}" >> $GITHUB_ENV
@@ -644,39 +591,115 @@ jobs:
           echo "KSU_URL=$KSU_URL" >> $GITHUB_ENV
 
       # ==================== 汇总 SUSFS 元数据 ====================
-      # 只使用各构建任务从「实际检出源码」导出的 Job Output；不再按固定分支
-      # 向上游发请求（那会忽略 config/config 的 commit 锁定与 SukiSU 镜像回退）
+      # 带 matrix 的可复用工作流无法把 Job Output 传给调用方，因此各构建任务从
+      # 「实际检出源码」读取的元数据以 artifact（susfs-meta-<CONFIG>）上传，
+      # 这里下载后汇总。不再按固定分支向上游发请求，也不按分支名推断版本。
+      - name: 下载 SUSFS 元数据
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          pattern: susfs-meta-*
+          path: ./susfs-meta
+          merge-multiple: true
+
       - name: 汇总 SUSFS 提交信息
         run: |
+          SUSFS_LABELS=()
+          SUSFS_BRANCHES=()
+          SUSFS_VERSIONS=()
+          SUSFS_COMMITS=()
+          SUSFS_DATES=()
+          SUSFS_SOURCES=()
+
+          # 把下载到的元数据按分支去重（同一分支的多个矩阵项内容一致）
+          META_LINES=""
+          if compgen -G "./susfs-meta/*.json" > /dev/null; then
+            META_LINES=$(python3 "$GITHUB_WORKSPACE/scripts/susfs_meta.py" ./susfs-meta)
+          fi
+          echo "已读取的 SUSFS 元数据分支："
+          printf '%s\n' "${META_LINES:-（无）}"
+
+          add_susfs_build() {
+            local selected="$1" label="$2" branch="$3"
+            [[ "$selected" == "true" ]] || return 0
+            local version="" commit="" date="" source="" line
+            while IFS='|' read -r b v c d s; do
+              [[ "$b" == "$branch" ]] || continue
+              version="$v"; commit="$c"; date="$d"; source="$s"
+              break
+            done <<< "$META_LINES"
+            SUSFS_LABELS+=("$label")
+            SUSFS_BRANCHES+=("$branch")
+            SUSFS_VERSIONS+=("$version")
+            SUSFS_COMMITS+=("$commit")
+            SUSFS_DATES+=("$date")
+            SUSFS_SOURCES+=("$source")
+          }
+          add_susfs_build "${{ inputs.build_a12_5_10 || inputs.build_all }}" "Android 12 / 5.10" "gki-android12-5.10"
+          add_susfs_build "${{ inputs.build_a13_5_15 || inputs.build_all }}" "Android 13 / 5.15" "gki-android13-5.15"
+          add_susfs_build "${{ inputs.build_a14_6_1 || inputs.build_all }}" "Android 14 / 6.1" "gki-android14-6.1"
+          add_susfs_build "${{ inputs.build_a15_6_6 || inputs.build_all }}" "Android 15 / 6.6" "gki-android15-6.6"
+          add_susfs_build "${{ inputs.build_a16_6_12 || inputs.build_all }}" "Android 16 / 6.12" "gki-android16-6.12"
+
+          # SUS_VER：显示用版本（各构建目标版本不同时用 " / " 连接，不做合并假设）
+          # SUS_VERSION：标签基准版本（取第一个拿到版本的目标，保证标签稳定）
+          SUS_VER=""
+          SUS_VERSION=""
+          declare -A SUS_VERSION_SEEN=()
+          for idx in "${!SUSFS_LABELS[@]}"; do
+            version="${SUSFS_VERSIONS[$idx]}"
+            [[ -n "$version" ]] || continue
+            if [[ -z "$SUS_VERSION" ]]; then
+              SUS_VERSION="$version"
+            fi
+            if [[ -z "${SUS_VERSION_SEEN[$version]:-}" ]]; then
+              SUS_VERSION_SEEN[$version]=1
+              if [[ -z "$SUS_VER" ]]; then
+                SUS_VER="$version"
+              else
+                SUS_VER="$SUS_VER / $version"
+              fi
+            fi
+          done
+
+          if [[ -z "$SUS_VERSION" ]]; then
+            if [[ "${{ inputs.cancel_susfs }}" == "true" ]]; then
+              echo "SUSFS 已禁用（cancel_susfs=true），Release 不展示 SUSFS 版本"
+              SUS_VER="未启用"
+            elif [[ ${#SUSFS_LABELS[@]} -eq 0 ]]; then
+              # 没有任何构建目标被选中：沿用旧行为的回退版本，不阻断发布
+              echo "::warning title=未选择构建目标::未选择任何构建目标，SUSFS 版本回退为默认值"
+              SUS_VER="未启用"
+            else
+              echo "::error title=SUSFS 版本缺失::SUSFS 已启用，但没有收到任何构建任务上传的 SUSFS 元数据（构建任务失败或未运行），拒绝生成空版本 Release"
+              exit 1
+            fi
+          fi
+          echo "SUS_VER=$SUS_VER" >> $GITHUB_ENV
+          echo "SUS_VERSION=$SUS_VERSION" >> $GITHUB_ENV
+          echo "本次构建 SUSFS 版本: ${SUS_VER:-未知}"
+
           : > susfs_commits.md
           : > susfs_table.md
-
-          append_susfs_info() {
-            local selected="$1" label="$2" branch="$3" version="$4" commit="$5" source="$6"
-            [[ "$selected" == "true" ]] || return 0
-
+          for idx in "${!SUSFS_LABELS[@]}"; do
+            label="${SUSFS_LABELS[$idx]}"
+            branch="${SUSFS_BRANCHES[$idx]}"
+            version="${SUSFS_VERSIONS[$idx]}"
+            commit="${SUSFS_COMMITS[$idx]}"
+            source="${SUSFS_SOURCES[$idx]}"
             if [[ -z "$commit" ]]; then
-              printf -- '- %s: 未获取到构建任务导出的 SUSFS 元数据\n' "$label" >> susfs_commits.md
+              printf -- '- %s: 未获取到构建任务上传的 SUSFS 元数据\n' "$label" >> susfs_commits.md
               printf -- '| %s | %s | - | - |\n' "$label" "${version:-未获取}" >> susfs_table.md
-              return 0
+              continue
             fi
-
-            local url
             case "$source" in
               *gitlab.com*)  url="https://gitlab.com/simonpunk/susfs4ksu/-/commit/$commit" ;;
               *ShirkNeko*)   url="https://github.com/ShirkNeko/susfs4ksu/commit/$commit" ;;
               *)             url="$source" ;;
             esac
-
             printf -- '- %s: [`%s`](%s) - %s（`%s`）\n' "$label" "${commit:0:7}" "$url" "${version:-未知版本}" "$branch" >> susfs_commits.md
             printf -- '| %s | `%s` | `%s` | %s |\n' "$label" "${version:-未获取}" "${commit:0:7}" "$source" >> susfs_table.md
-          }
-
-          append_susfs_info "${{ inputs.build_a12_5_10 || inputs.build_all }}" "Android 12 / 5.10" "${{ needs.build-a12-5-10.outputs.susfsBranch }}" "${{ needs.build-a12-5-10.outputs.susfsVersion }}" "${{ needs.build-a12-5-10.outputs.susfsCommit }}" "${{ needs.build-a12-5-10.outputs.susfsSource }}"
-          append_susfs_info "${{ inputs.build_a13_5_15 || inputs.build_all }}" "Android 13 / 5.15" "${{ needs.build-a13-5-15.outputs.susfsBranch }}" "${{ needs.build-a13-5-15.outputs.susfsVersion }}" "${{ needs.build-a13-5-15.outputs.susfsCommit }}" "${{ needs.build-a13-5-15.outputs.susfsSource }}"
-          append_susfs_info "${{ inputs.build_a14_6_1 || inputs.build_all }}" "Android 14 / 6.1" "${{ needs.build-a14-6-1.outputs.susfsBranch }}" "${{ needs.build-a14-6-1.outputs.susfsVersion }}" "${{ needs.build-a14-6-1.outputs.susfsCommit }}" "${{ needs.build-a14-6-1.outputs.susfsSource }}"
-          append_susfs_info "${{ inputs.build_a15_6_6 || inputs.build_all }}" "Android 15 / 6.6" "${{ needs.build-a15-6-6.outputs.susfsBranch }}" "${{ needs.build-a15-6-6.outputs.susfsVersion }}" "${{ needs.build-a15-6-6.outputs.susfsCommit }}" "${{ needs.build-a15-6-6.outputs.susfsSource }}"
-          append_susfs_info "${{ inputs.build_a16_6_12 || inputs.build_all }}" "Android 16 / 6.12" "${{ needs.build-a16-6-12.outputs.susfsBranch }}" "${{ needs.build-a16-6-12.outputs.susfsVersion }}" "${{ needs.build-a16-6-12.outputs.susfsCommit }}" "${{ needs.build-a16-6-12.outputs.susfsSource }}"
+          done
 
           if [[ ! -s susfs_commits.md ]]; then
             if [[ "${{ inputs.cancel_susfs }}" == "true" ]]; then
