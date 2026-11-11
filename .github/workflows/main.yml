@@ -498,8 +498,8 @@ jobs:
           fi
 
           # 发布标题与正文标题
-          echo "RELEASE_NAME=GKI Kernel: ${KSU_NAME} ${KSU_VER} + SUSFS ${SUS_VER}" >> $GITHUB_ENV
-          echo "RELEASE_HEADER=**${KSU_NAME} ${KSU_VER}** + **SUSFS ${SUS_VER}**" >> $GITHUB_ENV
+          # RELEASE_NAME / RELEASE_HEADER 依赖 SUSFS 版本，必须在「汇总 SUSFS 元数据」
+          # 之后生成（SUS_VER 由那里从构建元数据得出）。
 
       # ==================== 验证构建状态 ====================
       # 确保所有选中的构建任务都成功完成
@@ -678,6 +678,8 @@ jobs:
           echo "SUS_VER=$SUS_VER" >> $GITHUB_ENV
           echo "SUS_VERSION=$SUS_VERSION" >> $GITHUB_ENV
           echo "本次构建 SUSFS 版本: ${SUS_VER:-未知}"
+          echo "RELEASE_NAME=GKI Kernel: ${KSU_NAME} ${KSU_VER} + SUSFS ${SUS_VER}" >> $GITHUB_ENV
+          echo "RELEASE_HEADER=**${KSU_NAME} ${KSU_VER}** + **SUSFS ${SUS_VER}**" >> $GITHUB_ENV
 
           : > susfs_commits.md
           : > susfs_table.md
