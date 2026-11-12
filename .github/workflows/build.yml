@@ -121,11 +121,10 @@ jobs:
     runs-on: ubuntu-latest
     # repo sync 重试（3 x 20 分钟）+ 完整构建需要 60 分钟以上的余量
     timeout-minutes: 90
-    # 暴露本次构建「实际检出」的 SUSFS 元数据。
-    # 注意：带 matrix 的可复用工作流无法把 Job Output 传给调用方
-    # （已验证：调用方拿到的是空值），因此 Release 走「元数据 artifact」：
-    # 本步骤另写入 susfs-meta/<CONFIG>.json 并由下一步上传，调用方
-    # 下载 artifacts 后汇总。Job Output 只对非 matrix 调用方有效。
+    # 暴露本次构建「实际检出」的 SUSFS 元数据（Job Output）。
+    # 注意：带 matrix 的可复用工作流无法把 Job Output 传给调用方，
+    # 这里的输出只对非 matrix 调用方（如 kernel-custom.yml）有效；
+    # Release 侧改为按 config/config 的锁定结果独立解析。
     outputs:
       susfsBranch: ${{ steps.susfs_info.outputs.branch }}
       susfsSource: ${{ steps.susfs_info.outputs.source }}
@@ -369,41 +368,11 @@ jobs:
             echo "version=$SUSFS_VERSION"
           } >> "$GITHUB_OUTPUT"
 
-          # 供 Release 汇总的元数据文件（每个矩阵项一份，名称含 CONFIG 保证唯一）
-          if [ "${{ inputs.enable_susfs }}" == "true" ]; then
-            SUSFS_META_DIR="$GITHUB_WORKSPACE/susfs-meta"
-            mkdir -p "$SUSFS_META_DIR"
-            SUSFS_META_FILE="$SUSFS_META_DIR/${CONFIG}.json"
-            printf '{"branch":"%s","source":"%s","commit":"%s","commit_date":"%s","version":"%s"}\n' \
-              "$SUSFS_BRANCH" "$SUSFS_SOURCE" "$SUSFS_COMMIT" "$SUSFS_LATEST_COMMIT_DATE" "$SUSFS_VERSION" \
-              > "$SUSFS_META_FILE"
-            echo "SUSFS 元数据文件: $SUSFS_META_FILE"
-          fi
-
-          echo "SUSFS 分支    : $SUSFS_BRANCH"
-          echo "SUSFS 来源    : $SUSFS_SOURCE"
-          echo "SUSFS 提交    : $SUSFS_COMMIT"
-          echo "SUSFS 版本    : ${SUSFS_VERSION:-未启用}"
-
           echo "准备补丁资源..."
           git clone https://github.com/WildKernels/kernel_patches.git
           git clone https://github.com/ShirkNeko/SukiSU_patch.git
           echo "使用当前仓库补丁目录: $ZZH_PATCHES"
           git clone https://github.com/Numbersf/Action-Build.git --depth=1
-
-      # 矩阵各项上传各自的 SUSFS 元数据；Release 作业下载后汇总。
-      # 上传紧跟在 SUSFS 克隆步骤之后，后续编译失败也不影响 Release 读取元数据。
-      - name: 上传 SUSFS 元数据
-        if: inputs.enable_susfs
-        uses: actions/upload-artifact@v6
-        with:
-          name: susfs-meta-${{ env.CONFIG }}
-          path: susfs-meta/
-          if-no-files-found: error
-          # 允许重跑同一作业时覆盖上一次尝试的同名 artifact
-          overwrite: true
-          retention-days: 3
-          compression-level: 9
 
       - name: 初始化并同步内核源码
         working-directory: ${{ env.KERNEL_ROOT }}
