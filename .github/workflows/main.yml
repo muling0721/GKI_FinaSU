@@ -959,3 +959,14 @@ jobs:
           echo "- **标签**: $NEW_TAG" >> $GITHUB_STEP_SUMMARY
           echo "- **类型**: ${{ inputs.release_type }}" >> $GITHUB_STEP_SUMMARY
           echo "- **链接**: https://github.com/$REPO_OWNER/$REPO_NAME/releases/tag/$NEW_TAG" >> $GITHUB_STEP_SUMMARY
+          # SUSFS 源码元数据整轮只在这里汇总一次（build.yml 的 94 个矩阵作业不再各自写摘要）
+          if [ -s susfs_table.md ]; then
+            {
+              echo ""
+              echo "### SUSFS 源码（本次构建实际使用）"
+              echo ""
+              echo "| 构建目标 | 版本 | 提交 | 来源 |"
+              echo "|:---|:---|:---|:---|"
+              cat susfs_table.md
+            } >> $GITHUB_STEP_SUMMARY
+          fi

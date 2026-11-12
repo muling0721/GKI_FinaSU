@@ -385,21 +385,6 @@ jobs:
           echo "SUSFS 提交    : $SUSFS_COMMIT"
           echo "SUSFS 版本    : ${SUSFS_VERSION:-未启用}"
 
-          if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
-            {
-              echo ""
-              echo "### SUSFS 源码（本次构建实际检出）"
-              echo ""
-              echo "| 字段 | 值 |"
-              echo "|:---|:---|"
-              echo "| 分支 | \`$SUSFS_BRANCH\` |"
-              echo "| 来源 | $SUSFS_SOURCE |"
-              echo "| 提交 | \`$SUSFS_COMMIT\` |"
-              echo "| 提交日期 | $SUSFS_LATEST_COMMIT_DATE |"
-              echo "| 版本 | ${SUSFS_VERSION:-未启用} |"
-            } >> "$GITHUB_STEP_SUMMARY"
-          fi
-
           echo "准备补丁资源..."
           git clone https://github.com/WildKernels/kernel_patches.git
           git clone https://github.com/ShirkNeko/SukiSU_patch.git
