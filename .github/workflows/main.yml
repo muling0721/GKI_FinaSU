@@ -777,7 +777,7 @@ jobs:
           | KPM | $KPM_STATUS |
           | Droidspaces 容器支持 | $DROIDSPACES_STATUS |
 
-          ### SUSFS 源码（本次构建实际使用）
+          ### SUSFS 版本
 
           | 构建目标 | 版本 | 提交 | 来源 |
           |:---|:---|:---|:---|
