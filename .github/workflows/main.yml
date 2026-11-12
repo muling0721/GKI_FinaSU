@@ -625,7 +625,7 @@ jobs:
                 echo "::warning title=SUSFS 分支解析失败::无法获取 $branch 的 HEAD"
                 return 1
               fi
-              echo "::warning title=SUSFS 未锁定::custom=false，$branch 按当前分支 HEAD $commit 解析（构建时同源）"
+              echo "custom=false：$branch 按当前分支 HEAD $commit 解析（与构建同源）"
             fi
             prop=$(curl -fsSL --retry 3 --retry-delay 2 "$GITLAB_RAW/$commit/ksu_module_susfs/module.prop" 2>/dev/null) || return 1
             RS_VERSION=$(printf '%s\n' "$prop" | awk '
@@ -934,14 +934,17 @@ jobs:
         run: |
           echo "准备上传 APK 与 SUSFS 模块..."
           apk_count=$(find ./downloaded-artifacts -type f -name "*.apk" | wc -l || true)
-          sus_count=$(find ./downloaded-artifacts -type f -path "./downloaded-artifacts/susfs-*/*" | wc -l || true)
+          sus_count=$(find ./downloaded-artifacts -type f -path "./downloaded-artifacts/susfs-*/*" \
+            ! -path "./downloaded-artifacts/susfs-meta-*/*" | wc -l || true)
           echo "APK files: ${apk_count}"
           echo "SUSFS files: ${sus_count}"
           find ./downloaded-artifacts -type f -name "*.apk" -print0 | \
           while IFS= read -r -d '' f; do
             gh release upload "$NEW_TAG" "$f" || true
           done
-          find ./downloaded-artifacts -type f -path "./downloaded-artifacts/susfs-*/*" -print0 | \
+          # 只上传「配套 SUSFS 模块」目录内的文件；susfs-meta-*（元数据）不是产物，绝不能上传
+          find ./downloaded-artifacts -type f -path "./downloaded-artifacts/susfs-*/*" \
+            ! -path "./downloaded-artifacts/susfs-meta-*/*" -print0 | \
           while IFS= read -r -d '' f; do
             gh release upload "$NEW_TAG" "$f" || true
           done
