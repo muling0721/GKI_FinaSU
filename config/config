@@ -15,7 +15,8 @@
 custom=false
 
 # ==================== SUSFS 各分支的 commit hash ====================
-# 仅当 custom=true 时生效
+# 仅当 custom=true 时生效；当前 custom=false，SUSFS 跟随各分支最新提交。
+# 需要锁定/回退时把 custom 改回 true，即使用下方快照：
 # 统一锁定到 2026-11-09 22:16:14 +0800 的快照（各分支该时刻及之前的
 # 最后一个提交，均为 "KernelSU: Sync with upstream"）。
 #
