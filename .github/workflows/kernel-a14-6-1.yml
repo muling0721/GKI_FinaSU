@@ -15,7 +15,7 @@ on:
           - FinaSU
         default: FinaSU
       build_channel:
-        description: "构建通道（正式=官方 Release 发行版，最新=上游最新提交）"
+        description: "构建管理器通道"
         required: false
         type: choice
         options:
@@ -23,7 +23,7 @@ on:
           - "最新 (HEAD)"
         default: "正式 (Release)"
       version:
-        description: "自定义版本名 (可选)"
+        description: "自定义内核版本名"
         required: false
         type: string
       build_time:
@@ -32,14 +32,10 @@ on:
         type: string
         default: ""
       use_kpm:
-        description: "KPM 功能（仅SukiSU支持）"
+        description: "KPM 功能（仅SukiSU-Nova支持，开启未修补）"
         required: true
-        type: choice
-        default: "disabled (关闭)"
-        options:
-          - "disabled (关闭)"
-          - "enabled (开启)"
-          - "patched (开启并修补)"
+        type: boolean
+        default: false
       droidspaces:
         description: "Droidspaces 容器支持"
         required: false
@@ -58,6 +54,15 @@ on:
           - "仅上传 AnyKernel3.zip"
           - "上传全部"
         default: "仅上传 AnyKernel3.zip"
+      ksu_mode:
+        description: "KernelSU / SUSFS 模式"
+        required: true
+        type: choice
+        options:
+          - "关闭"
+          - "禁用SUSFS"
+          - "禁用KSU"
+        default: "关闭"
       droidspaces_ntsync:
         description: "启用 Droidspaces 容器 NTSync 支持（需启用 Droidspaces）"
         required: false
@@ -83,21 +88,21 @@ on:
         required: false
         type: boolean
         default: false
-      cve_2026_43499_patch:
-        description: "应用 CVE-2026-43499 rtmutex 修复链"
+      use_nomount:
+        description: "启用 NoMount 挂载元模块（需自行刷入配套模块）"
         required: false
         type: boolean
         default: false
-      cancel_susfs:
-        description: "禁用 SUSFS"
-        required: true
+      cve_2026_43499_patch:
+        description: "应用 CVE-2026-43499 rtmutex 修复链"
+        required: false
         type: boolean
         default: false
       skip_incompatible:
         description: "功能不兼容或无法使用时自动跳过该功能（不中断构建）"
         required: false
         type: boolean
-        default: false
+        default: true
   workflow_call:
     inputs:
       kernelsu_variant:
@@ -126,9 +131,14 @@ on:
         type: boolean
         default: false
       use_kpm:
-        required: true
-        type: string
+        required: false
+        type: boolean
+        default: false
       use_rekernel:
+        required: false
+        type: boolean
+        default: false
+      use_nomount:
         required: false
         type: boolean
         default: false
@@ -136,9 +146,10 @@ on:
         required: false
         type: boolean
         default: false
-      cancel_susfs:
+      ksu_mode:
         required: false
-        type: boolean
+        type: string
+        default: "关闭"
       droidspaces:
         required: false
         type: string
@@ -154,7 +165,7 @@ on:
       skip_incompatible:
         required: false
         type: boolean
-        default: false
+        default: true
       called_from_main:
         description: "是否从 main.yml 调用（内部使用）"
         required: false
@@ -257,11 +268,13 @@ jobs:
       use_zram: ${{ inputs.use_zram }}
       use_bbg: ${{ inputs.use_bbg }}
       use_net_enhance: ${{ inputs.use_net_enhance }}
-      use_kpm: ${{ inputs.use_kpm }}
+      use_kpm: ${{ inputs.use_kpm || false }}
       use_rekernel: ${{ inputs.use_rekernel || false }}
+      use_nomount: ${{ inputs.use_nomount || false }}
       cve_2026_43499_patch: ${{ inputs.cve_2026_43499_patch }}
       supp_op: false
-      enable_susfs: ${{ !inputs.cancel_susfs }}
+      enable_susfs: ${{ inputs.ksu_mode != '禁用SUSFS' && inputs.ksu_mode != '禁用KSU' }}
+      ksu_mode: ${{ inputs.ksu_mode }}
       droidspaces: ${{ inputs.droidspaces || 'off' }}
       droidspaces_ntsync: ${{ inputs.droidspaces_ntsync || false }}
       artifact_upload_mode: ${{ inputs.artifact_upload_mode }}
@@ -275,3 +288,17 @@ jobs:
     with:
       kernelsu_variant: ${{ inputs.kernelsu_variant }}
       build_channel: ${{ inputs.build_channel }}
+      ksu_mode: ${{ inputs.ksu_mode }}
+      use_nomount: ${{ inputs.use_nomount || false }}
+      use_zram: ${{ inputs.use_zram }}
+      use_bbg: ${{ inputs.use_bbg }}
+      use_net_enhance: ${{ inputs.use_net_enhance }}
+      use_rekernel: ${{ inputs.use_rekernel }}
+      use_kpm: ${{ inputs.use_kpm }}
+      cve_2026_43499_patch: ${{ inputs.cve_2026_43499_patch }}
+      skip_incompatible: ${{ inputs.skip_incompatible || false }}
+      droidspaces: ${{ inputs.droidspaces || 'off' }}
+      droidspaces_ntsync: ${{ inputs.droidspaces_ntsync || false }}
+      artifact_upload_mode: ${{ inputs.artifact_upload_mode }}
+      version: ${{ inputs.version || '' }}
+      build_time: ${{ inputs.build_time || '' }}

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SukiSU 内核源码 API 兼容补丁（SukiSU-Ultra builtin / main 分支均适用）
+# SukiSU-Nova 内核源码 API 兼容补丁（SukiSU-Nova builtin / main 分支均适用）
 #
 # 背景：
 #   1) builtin 分支 kernel/hook/lsm_hook.c 仍以旧签名
@@ -31,10 +31,10 @@ KSU_DIR="${1:-KernelSU}"
 
 fail() {
   if [ "$SKIP_INCOMPATIBLE" = "true" ]; then
-    echo "::warning title=SukiSU 兼容补丁已跳过::$1"
+    echo "::warning title=SukiSU-Nova 兼容补丁已跳过::$1"
     if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
       echo "" >> "$GITHUB_STEP_SUMMARY"
-      echo "> ⏭️ **SukiSU API 兼容补丁** 已自动跳过：$1（构建未中断）" >> "$GITHUB_STEP_SUMMARY"
+      echo "> ⏭️ **SukiSU-Nova API 兼容补丁** 已自动跳过：$1（构建未中断）" >> "$GITHUB_STEP_SUMMARY"
     fi
     exit 0
   fi
@@ -53,7 +53,7 @@ if [ -f "$LSM_FILE" ] && grep -q 'security_add_hooks(ksu_hooks, ARRAY_SIZE(ksu_h
   else
     echo "应用 lsm_id 兼容补丁 (6.8+ security_add_hooks 新签名)..."
     patch -p1 --forward -d "$KSU_DIR" < "$COMPAT_DIR/sukisu-lsm-id-6.8.patch" \
-      || fail "lsm_id 兼容补丁应用失败（SukiSU 上游代码可能已变化）"
+      || fail "lsm_id 兼容补丁应用失败（SukiSU-Nova 上游代码可能已变化）"
     grep -q 'struct lsm_id ksu_lsm_id' "$LSM_FILE" \
       || fail "lsm_id 兼容补丁应用后校验失败"
     echo "lsm_hook.c: 6.8+ 已切换为 struct lsm_id 注册"
@@ -78,13 +78,13 @@ if [ -f "$LSM_FILE" ] && grep -q 'handle_zygote_setresuid' "$LSM_FILE"; then
     echo "lsm_hook.c 已包含 seccomp 过滤模式逻辑，跳过"
   else
     echo "应用 seccomp 过滤模式补丁 (对齐 main 分支/BakaSU：管理器与授权应用保留 seccomp 过滤器)..."
-    [ -d "$KSU_DIR/kernel/infra" ] || fail "未找到 $KSU_DIR/kernel/infra 目录，SukiSU builtin 结构可能已变化"
+    [ -d "$KSU_DIR/kernel/infra" ] || fail "未找到 $KSU_DIR/kernel/infra 目录，SukiSU-Nova builtin 结构可能已变化"
     cp "$COMPAT_DIR/seccomp_cache.h" "$KSU_DIR/kernel/infra/seccomp_cache.h" \
       || fail "seccomp_cache.h 分发失败"
     cp "$COMPAT_DIR/seccomp_cache.c" "$KSU_DIR/kernel/infra/seccomp_cache.c" \
       || fail "seccomp_cache.c 分发失败"
     python3 "$COMPAT_DIR/seccomp_filter_mode.py" "$KSU_DIR" \
-      || fail "seccomp 过滤模式补丁应用失败（SukiSU builtin 上游代码可能已变化）"
+      || fail "seccomp 过滤模式补丁应用失败（SukiSU-Nova builtin 上游代码可能已变化）"
     grep -q 'ksu_seccomp_allow_cache' "$LSM_FILE" \
       || fail "seccomp 过滤模式补丁应用后校验失败 (lsm_hook.c)"
     # 聚合编译文件随上游重构更名（kernel/ksu.c -> kernel/ksu_main.c），按实际路径校验
@@ -111,7 +111,7 @@ fi
 # 构建开启 -Werror,-Wimplicit-fallthrough 时会直接报错。改用内核
 # fallthrough 宏（展开为 __attribute__((__fallthrough__))），上游修复后自动跳过。
 if grep -rqF '/* fall through */' "$KSU_DIR/kernel" 2>/dev/null; then
-  echo "修正 SukiSU 源码的注释式 fall-through（bazel -Werror 兼容）..."
+  echo "修正 SukiSU-Nova 源码的注释式 fall-through（bazel -Werror 兼容）..."
   python3 - "$KSU_DIR" <<'PYEOF'
 import pathlib
 import sys
@@ -133,7 +133,76 @@ PYEOF
   fi
   echo "fall-through 注解修正完成"
 else
-  echo "SukiSU 源码无注释式 fall-through，跳过"
+  echo "SukiSU-Nova 源码无注释式 fall-through，跳过"
 fi
 
-echo "SukiSU API 兼容补丁处理完成"
+# ---- 6.12+ LSM 静态调用槽位（builtin 分支）----
+# 背景：6.12 的 LSM 框架把每个 hook 的回调预先编成 static call 表，
+#   表宽是编译期算出的 MAX_LSM_COUNT（= 内建 LSM 数量）。
+#   security_add_hooks() 里 lsm_active_cnt >= MAX_LSM_COUNT 直接
+#   panic("Too many LSMs registered")。
+#   GKI 的 gki_defconfig 恰好启用 5 个 LSM
+#   （capabilities/selinux/safesetid/bpf_lsm/landlock），
+#   MAX_LSM_COUNT == 5 且开机时全部注册，没有空位。
+#   builtin 分支的 hook/lsm_hook.c 仍在 device_initcall 阶段用
+#   security_add_hooks() 注册自己的 LSM（main/FinaSU 已改为运行期改写
+#   static call 槽位，不占新位），于是第 6 个 LSM 触发上述 panic：
+#   刷入后停在开机第一屏、panic 后不落盘任何日志（PANIC_TIMEOUT=-1）。
+# 处理：给 MAX_LSM_COUNT 预留一个显式的 KSU 槽位（KSU_ENABLED 1,）。
+#   static call 表随之加宽一列，KSU 注册时能拿到空闲槽位。
+# 守卫：仅当内核启用 static call LSM 框架（security/security.c 含上述 panic）
+#   且 KSU 驱动仍调用 security_add_hooks() 时执行；上游改用槽位改写后自动跳过。
+LSM_ROOT="${KERNEL_ROOT:-.}"
+LSM_COUNT_FILE="$LSM_ROOT/common/include/linux/lsm_count.h"
+LSM_PANIC_GUARD="$LSM_ROOT/common/security/security.c"
+if [ -f "$LSM_COUNT_FILE" ] && [ -f "$LSM_PANIC_GUARD" ] \
+  && grep -qs 'Too many LSMs registered' "$LSM_PANIC_GUARD" \
+  && grep -qs 'security_add_hooks(ksu_hooks' "$KSU_DIR/kernel/hook/lsm_hook.c"; then
+  if grep -q 'KSU_ENABLED' "$LSM_COUNT_FILE"; then
+    echo "lsm_count.h 已含 KSU 槽位，跳过"
+  else
+    echo "为内建 KSU 预留 LSM static call 槽位 (MAX_LSM_COUNT +1)..."
+    python3 - "$LSM_COUNT_FILE" <<'PYEOF'
+import sys
+
+path = sys.argv[1]
+text = open(path, encoding="utf-8", errors="surrogateescape").read()
+
+block = """/*
+ * KernelSU registers its own LSM from device_initcall, after every built-in
+ * LSM has taken its static call slot. Reserve one extra column so that
+ * security_add_hooks() finds a free slot instead of panicking with
+ * "Too many LSMs registered".
+ */
+#if IS_ENABLED(CONFIG_KSU)
+#define KSU_ENABLED 1,
+#else
+#define KSU_ENABLED
+#endif
+
+"""
+
+anchor = "#define MAX_LSM_COUNT"
+idx = text.find(anchor)
+if idx < 0:
+    sys.exit("MAX_LSM_COUNT not found")
+
+text = text[:idx] + block + text[idx:]
+
+open_brace = text.find("COUNT_LSMS(", idx)
+if open_brace < 0:
+    sys.exit("COUNT_LSMS not found")
+line_end = text.find("\n", open_brace)
+text = text[:line_end + 1] + "\t\tKSU_ENABLED\t\t\\\n" + text[line_end + 1:]
+
+open(path, "w", encoding="utf-8", errors="surrogateescape").write(text)
+print("  lsm_count.h: MAX_LSM_COUNT 已为 KSU 增加一列")
+PYEOF
+    grep -q 'KSU_ENABLED' "$LSM_COUNT_FILE" \
+      || fail "lsm_count.h 增加 KSU 槽位后校验失败"
+  fi
+else
+  echo "内核无 lsm_count.h 或 KSU 未用 security_add_hooks，跳过 LSM 槽位预留"
+fi
+
+echo "SukiSU-Nova API 兼容补丁处理完成"

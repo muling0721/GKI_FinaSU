@@ -14,6 +14,67 @@ on:
         required: false
         type: string
         default: "正式 (Release)"
+      ksu_mode:
+        description: "KernelSU / SUSFS 模式（关闭时下载 SUSFS 模块）"
+        required: false
+        type: string
+        default: "关闭"
+      use_nomount:
+        description: "启用 NoMount 挂载元模块（启用时下载配套模块）"
+        required: false
+        type: boolean
+        default: false
+      use_zram:
+        required: false
+        type: boolean
+        default: false
+      use_bbg:
+        required: false
+        type: boolean
+        default: false
+      use_net_enhance:
+        required: false
+        type: boolean
+        default: false
+      use_rekernel:
+        required: false
+        type: boolean
+        default: false
+      use_kpm:
+        required: false
+        type: boolean
+        default: false
+      cve_2026_43499_patch:
+        required: false
+        type: boolean
+        default: false
+      skip_incompatible:
+        required: false
+        type: boolean
+        default: true
+      droidspaces:
+        description: "Droidspaces 槽位（off/678/123/345）"
+        required: false
+        type: string
+        default: "off"
+      droidspaces_ntsync:
+        required: false
+        type: boolean
+        default: false
+      artifact_upload_mode:
+        required: false
+        type: string
+        default: "仅上传 AnyKernel3.zip"
+      version:
+        description: "自定义内核版本名（留空=默认）"
+        required: false
+        type: string
+        default: ""
+      build_time:
+        description: "自定义构建时间（留空=自动获取当前北京时间）"
+        required: false
+        type: string
+        default: ""
     outputs:
       ksuVer:
         description: "The calculated KSU version number"
@@ -41,7 +102,7 @@ on:
 
 jobs:
   get_ksu_manager:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       # 输出1: KSU版本号
       ksuVer: ${{ steps.get_version.outputs.kversion }}
@@ -71,11 +132,12 @@ jobs:
 
       - name: 获取 KSU & SUSFS 版本
         id: get_version
+        if: inputs.ksu_mode != '禁用KSU'
         run: |
 
-          if [ "${{ inputs.kernelsu_variant }}" == "SukiSU" ]; then
-            echo "This is the SukiSU variant"
-            git clone https://github.com/SukiSU-Ultra/SukiSU-Ultra.git KernelSU
+          if [ "${{ inputs.kernelsu_variant }}" == "SukiSU-Nova" ]; then
+            echo "This is the SukiSU-Nova variant"
+            git clone https://github.com/SukiSU-Nova/SukiSU-Nova.git KernelSU
           elif [ "${{ inputs.kernelsu_variant }}" == "BakaSU" ]; then
             echo "This is the BakaSU variant"
             git clone https://github.com/Baka-SU/BakaSU.git KernelSU
@@ -92,8 +154,8 @@ jobs:
           # 计算KSU版本号
           KSU_GIT_VERSION=$(git rev-list --count HEAD)
 
-          if [ "${{ inputs.kernelsu_variant }}" == "SukiSU" ]; then
-            KSU_VERSION=$((40000 + KSU_GIT_VERSION - 2815))
+          if [ "${{ inputs.kernelsu_variant }}" == "SukiSU-Nova" ]; then
+            KSU_VERSION=$((30000 + KSU_GIT_VERSION - 4001))
           elif [ "${{ inputs.kernelsu_variant }}" == "FinaSU" ]; then
             # FinaSU 内核 Kbuild 与管理器 build.gradle.kts 均以 30000 + git 提交数计算版本
             KSU_VERSION=$((30000 + KSU_GIT_VERSION))
@@ -116,7 +178,7 @@ jobs:
       #       上游没有正式版 Release 时（如 BakaSU 只有 rc 预发布），
       #       改用官方默认分支最新上传构建，内核仍锁定该构建提交
       # 最新：管理器取与默认分支 HEAD 版本一致的最新构建（不限分支），内核锁定该 HEAD；
-      #       FinaSU 取 build-manager.yml 最新构建，内核锁定该构建提交
+      #       BakaSU/FinaSU 直接取 build-manager.yml 最新构建，内核锁定该构建提交
       - name: 选择管理器来源（构建通道）
         id: channel
         run: |
@@ -129,7 +191,7 @@ jobs:
           echo "构建通道: $CHANNEL_RAW -> $CHANNEL_KIND (pin_mode=$PIN_MODE)"
 
           case "${{ inputs.kernelsu_variant }}" in
-            "SukiSU") REPO="SukiSU-Ultra/SukiSU-Ultra"; PREF="universal" ;;
+            "SukiSU-Nova") REPO="SukiSU-Nova/SukiSU-Nova"; PREF="universal" ;;
             "BakaSU") REPO="Baka-SU/BakaSU";           PREF="arm64" ;;
             "FinaSU") REPO="LyraVoid/FinaSU";          PREF="universal" ;;
             *) echo "::error::未知变体"; exit 1 ;;
@@ -193,6 +255,55 @@ jobs:
             ')
           fi
 
+          # Release 列表接口在部分仓库（如刚改名/迁移后）会返回空数组，而
+          # /releases/latest 仍可正常返回；latest 语义即"最新非预发布版"，
+          # 此时退回 latest，避免把"有正式版"误判成"无正式版"而落到 CI 构建
+          if [ -z "$PICK" ]; then
+            LATEST_JSON=""
+            for ATTEMPT in 1 2 3; do
+              LATEST_CODE=$(curl -s -o /tmp/rel_latest.json -w '%{http_code}' --max-time 30 \
+                -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+                -H "Accept: application/vnd.github+json" \
+                "https://api.github.com/repos/$REPO/releases/latest") || LATEST_CODE=000
+              if [ "$LATEST_CODE" = "200" ]; then
+                LATEST_JSON=$(cat /tmp/rel_latest.json)
+                break
+              fi
+              if [ "$LATEST_CODE" = "404" ]; then
+                echo "$REPO 没有 latest Release（上游只有预发布版或未发布）"
+                break
+              fi
+              echo "获取 $REPO 的 latest Release 失败（HTTP $LATEST_CODE），重试 ($ATTEMPT/3)..."
+              sleep 5
+            done
+            if [ -n "$LATEST_JSON" ]; then
+              PICK=$(printf '%s' "$LATEST_JSON" | jq -r --arg pref "$PREF" '
+                [ . ]
+                | map(select((.draft | not) and (.prerelease | not)))
+                | map(. + {
+                    _apks: [ .assets[]?
+                             | select(.name | test("\\.apk$"; "i"))
+                             | select(.name | test("(?i)debug|spoofed") | not) ]
+                  })
+                | map(. + {
+                    _apks: (._apks | sort_by(
+                      if   (.name | test("(?i)" + $pref)) then 0
+                      elif (.name | test("(?i)universal")) then 1
+                      elif (.name | test("(?i)arm64")) then 2
+                      else 3 end))
+                  })
+                | map(select((._apks | length) > 0))
+                | .[0] as $p
+                | if $p then
+                    [ $p.tag_name, ( $p.prerelease | tostring ), $p._apks[0].name, $p._apks[0].browser_download_url ] | @tsv
+                  else empty end
+              ')
+              if [ -n "$PICK" ]; then
+                echo "Release 列表为空，改用 latest 接口：$PICK"
+              fi
+            fi
+          fi
+
           if [ -z "$PICK" ]; then
             echo "::notice::$REPO 没有可用的正式版 Release（仅预发布或未附 APK），改用官方默认分支最新上传构建（内核仍锁定该提交）"
             exit 0
@@ -229,12 +340,13 @@ jobs:
 
       - name: 添加 KernelSU
         id: add_KSU
+        if: inputs.ksu_mode != '禁用KSU'
         continue-on-error: true
         run: |
           VARIANT="${{ inputs.kernelsu_variant }}"
 
           case "$VARIANT" in
-            "SukiSU") REPO="SukiSU-Ultra/SukiSU-Ultra"; KSUM="manager"; EXPECTED_BRANCH="main" ;;
+            "SukiSU-Nova") REPO="SukiSU-Nova/SukiSU-Nova"; KSUM="manager"; EXPECTED_BRANCH="main" ;;
             "BakaSU") REPO="Baka-SU/BakaSU";           KSUM="manager"; EXPECTED_BRANCH="main" ;;
             "FinaSU") REPO="LyraVoid/FinaSU";          KSUM="manager"; EXPECTED_BRANCH="master" ;;
             *) echo "::error::未知变体: $VARIANT"; exit 1 ;;
@@ -272,7 +384,7 @@ jobs:
                 REL_COUNT=$(git -C KernelSU rev-list --count "$REL_COMMIT" 2>/dev/null || echo "")
                 if [ -n "$REL_COUNT" ]; then
                   case "$VARIANT" in
-                    SukiSU) REL_KSU_VERSION=$((40000 + REL_COUNT - 2815)) ;;
+                    SukiSU-Nova) REL_KSU_VERSION=$((30000 + REL_COUNT - 4001)) ;;
                     BakaSU) REL_KSU_VERSION=$((30700 + REL_COUNT)) ;;
                     FinaSU) REL_KSU_VERSION=$((30000 + REL_COUNT)) ;;
                   esac
@@ -372,7 +484,7 @@ jobs:
             exit 0
           fi
 
-          # ---------- 最新通道：官方 CI 构建的管理器（SukiSU / BakaSU / FinaSU） ----------
+          # ---------- 最新通道：官方 CI 构建的管理器（SukiSU-Nova / BakaSU / FinaSU） ----------
           get_manager_artifacts() {
             local artifacts="$1"
             if [ "$VARIANT" == "FinaSU" ]; then
@@ -392,7 +504,7 @@ jobs:
           # 版本号与管理器 versionCode 同源（提交数 + 偏移），用于按版本挑选构建
           ksu_version_of() {
             case "$1" in
-              SukiSU) echo $((40000 + $2 - 2815)) ;;
+              SukiSU-Nova) echo $((30000 + $2 - 4001)) ;;
               BakaSU) echo $((30700 + $2)) ;;
               FinaSU) echo $((30000 + $2)) ;;
             esac
@@ -400,10 +512,15 @@ jobs:
 
           # 最新通道：先锁定默认分支 HEAD，再把管理器限定为「版本与该 HEAD 一致」的构建，
           # 避免出现内核 35249 / 管理器 35248 这种版本错位。
-          # FinaSU 例外：直接取 build-manager.yml 的最新构建，内核锁定该构建提交。
+          # BakaSU/FinaSU 例外：不锁默认分支 HEAD，直接取 build-manager.yml 按创建时间
+          # 倒序的最新成功构建，内核锁定该构建提交，保证管理器与内核版本严格一致。
+          LATEST_PICK_BUILD=0
+          if [ "$VARIANT" = "BakaSU" ] || [ "$VARIANT" = "FinaSU" ]; then
+            LATEST_PICK_BUILD=1
+          fi
           HEAD_SHA=""
           HEAD_VERSION=""
-          if [ "${PIN_MODE:-pin}" = "head" ] && [ "$VARIANT" != "FinaSU" ]; then
+          if [ "${PIN_MODE:-pin}" = "head" ] && [ "$LATEST_PICK_BUILD" = 0 ]; then
             HEAD_SHA=$(git -C KernelSU rev-parse "origin/${EXPECTED_BRANCH}^{commit}" 2>/dev/null || true)
             if [ -z "$HEAD_SHA" ]; then
               HEAD_SHA=$(git ls-remote "https://github.com/$REPO.git" "refs/heads/$EXPECTED_BRANCH" 2>/dev/null | awk '{print $1}')
@@ -457,7 +574,7 @@ jobs:
                 CREATED=$(printf '%s' "$RUNS" | jq -r ".workflow_runs[$INDEX].created_at")
                 # 正式通道：只认官方默认分支上传的构建（push 与 workflow_dispatch 均可，
                 # 手动触发常用于正式上传前测试），跳过 PR / 其他分支构建
-                #（SukiSU/BakaSU 为 main，FinaSU 为 master）
+                #（SukiSU-Nova/BakaSU 为 main，FinaSU 为 master）
                 # 最新通道：接受任意分支的构建（跳过 PR 构建），再按版本与 HEAD 匹配排序
                 if [ "${PIN_MODE:-pin}" = "head" ]; then
                   if [ "$EVENT" != "push" ] && [ "$EVENT" != "workflow_dispatch" ]; then
@@ -513,7 +630,7 @@ jobs:
           fi
 
           ORDERED_FILE=$(mktemp)
-          if [ "$VARIANT" == "FinaSU" ]; then
+          if [ "$LATEST_PICK_BUILD" = 1 ]; then
             # 最新通道：严格按构建时间倒序，取 build-manager.yml 最新成功构建
             sort -t$'\t' -k1,1r "$CAND_UNIQ" \
               | awk -F'\t' '{ print "0\t" $0 }' > "$ORDERED_FILE"
@@ -598,7 +715,7 @@ jobs:
           if [ -n "$PIN_COUNT" ]; then
             case "$VARIANT" in
               BakaSU) PINNED_KSU_VERSION=$((30700 + PIN_COUNT)) ;;
-              SukiSU) PINNED_KSU_VERSION=$((40000 + PIN_COUNT - 2815)) ;;
+              SukiSU-Nova) PINNED_KSU_VERSION=$((30000 + PIN_COUNT - 4001)) ;;
               FinaSU) PINNED_KSU_VERSION=$((30000 + PIN_COUNT)) ;;
               *)      PINNED_KSU_VERSION="" ;;
             esac
@@ -630,14 +747,14 @@ jobs:
             fi
           fi
 
-          if [ "${PIN_MODE:-pin}" = "head" ] && [ -n "$HEAD_SHA" ] && [ "$VARIANT" != "FinaSU" ]; then
+          if [ "${PIN_MODE:-pin}" = "head" ] && [ -n "$HEAD_SHA" ] && [ "$LATEST_PICK_BUILD" = 0 ]; then
             if [ -n "$HEAD_VERSION" ] && [ "$MANAGER_VERSION" != "$HEAD_VERSION" ]; then
               echo "::warning::最新通道：未找到与 $EXPECTED_BRANCH HEAD 版本 $HEAD_VERSION 一致的管理器，回退到 $MANAGER_VERSION"
             fi
             echo "最新通道：内核锁定 $EXPECTED_BRANCH HEAD ${HEAD_SHA:0:8}，管理器版本 $MANAGER_VERSION"
             echo "ksuCommit=$HEAD_SHA" >> $GITHUB_OUTPUT
           else
-            if [ "$VARIANT" == "FinaSU" ]; then
+            if [ "${PIN_MODE:-pin}" = "head" ] && [ "$LATEST_PICK_BUILD" = 1 ]; then
               echo "最新通道：内核锁定 build-manager 构建提交 ${MANAGER_HEAD_SHA:0:8}，管理器版本 $MANAGER_VERSION"
             else
               echo "内核锁定构建提交 ${MANAGER_HEAD_SHA:0:8}，管理器版本 $MANAGER_VERSION"
@@ -658,6 +775,7 @@ jobs:
 
       - name: 添加 SUSFS 模块
         id: add_SUSFS
+        if: inputs.ksu_mode == '关闭'
         continue-on-error: true
         run: |
           # 上游 susfs4ksu-module 的 Actions artifacts 已全部过期，
@@ -692,37 +810,138 @@ jobs:
           fi
           echo "SUSFS_NAME=$TAG_NAME" >> $GITHUB_ENV
 
-          # Release 资产本身即完整模块 zip，校验完整性后直接放入模块目录
+          # 校验后解压到模块目录：产物下载即模块本身，不再套一层 zip
           if ! unzip -t "$NAME" >/dev/null 2>&1; then
             echo "下载的 SUSFS 模块 zip 损坏"
             exit 1
           fi
-          mkdir -p susfs-module
-          mv "$NAME" "susfs-module/$NAME"
+          rm -rf susfs-module && mkdir -p susfs-module
+          unzip -oq "$NAME" -d susfs-module
+          rm -f "$NAME"
+          [ -f susfs-module/module.prop ] || { echo "SUSFS 模块缺少 module.prop"; exit 1; }
           ls -la susfs-module/
+
+      - name: 添加 NoMount 模块
+        id: add_nomount
+        if: inputs.use_nomount && inputs.ksu_mode != '禁用KSU'
+        continue-on-error: true
+        run: |
+          # NoMount 以挂载元模块形式随 Release 发布，启用 use_nomount 时拉取最新模块 zip
+          RELEASE_API="https://api.github.com/repos/maxsteeel/nomount/releases/latest"
+          RELEASE_JSON=""
+          for ATTEMPT in 1 2 3; do
+            RELEASE_JSON=$(curl -s --fail --max-time 30 \
+              -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" "$RELEASE_API") \
+              && [ -n "$RELEASE_JSON" ] && break
+            echo "获取 NoMount Release 信息失败，重试 ($ATTEMPT/3)..."
+            sleep 5
+          done
+          if [ -z "$RELEASE_JSON" ]; then
+            echo "无法获取 NoMount 最新 Release 信息"
+            exit 1
+          fi
+
+          TAG_NAME=$(printf '%s' "$RELEASE_JSON" | jq -r '.tag_name')
+          ASSET_URL=$(printf '%s' "$RELEASE_JSON" | jq -r '.assets[] | select(.name | endswith(".zip")) | .browser_download_url' | head -n 1)
+          if [ -z "$ASSET_URL" ] || [ "$ASSET_URL" = "null" ]; then
+            echo "Release $TAG_NAME 中未找到 NoMount 模块 zip"
+            exit 1
+          fi
+          ASSET_NAME=$(basename "$ASSET_URL")
+
+          echo "下载 NoMount 模块: $ASSET_NAME (Release $TAG_NAME)"
+          if ! curl -sL --fail --retry 3 --max-time 180 -o "$ASSET_NAME" "$ASSET_URL"; then
+            echo "下载 NoMount 模块失败: $ASSET_URL"
+            exit 1
+          fi
+          echo "NOMOUNT_NAME=$TAG_NAME" >> $GITHUB_ENV
+
+          if ! unzip -t "$ASSET_NAME" >/dev/null 2>&1; then
+            echo "下载的 NoMount 模块 zip 损坏"
+            exit 1
+          fi
+          rm -rf nomount-module && mkdir -p nomount-module
+          unzip -oq "$ASSET_NAME" -d nomount-module
+          rm -f "$ASSET_NAME"
+          [ -f nomount-module/module.prop ] || { echo "NoMount 模块缺少 module.prop"; exit 1; }
+          ls -la nomount-module/
 
       - name: Notify on failure
         if: steps.add_KSU.outcome == 'failure'
         run: echo "下载CI构建的KSU失败!"
 
-      - name: 构建通道摘要
+      - name: 构建总结
         if: always()
         run: |
+          VARIANT="${{ inputs.kernelsu_variant }}"
+          MANAGER_VER="${{ steps.add_KSU.outputs.managerVer }}"
+          if [ "${{ inputs.ksu_mode }}" = "禁用KSU" ]; then
+            MANAGER_VER="未集成"
+          fi
+          [ -n "$MANAGER_VER" ] || MANAGER_VER="未获取"
+
+          case "${CHANNEL_KIND:-}" in
+            latest) CH_LABEL="最新通道（HEAD）" ;;
+            *)      CH_LABEL="正式通道（Release）" ;;
+          esac
+
+          flag() { [ "$1" = "true" ] && echo "✅ 启用" || echo "➖ 关闭"; }
+
+          if [ "${{ inputs.ksu_mode }}" = "关闭" ]; then
+            SUS_ROW="✅ 启用"
+          else
+            SUS_ROW="⛔ 禁用"
+          fi
+
+          DS_RAW="${{ inputs.droidspaces }}"
+          DS_SLOT="${DS_RAW%% *}"
+          if [ -z "$DS_SLOT" ] || [ "$DS_SLOT" = "off" ]; then
+            DS_ROW="➖ 关闭"
+          elif [ "${{ inputs.droidspaces_ntsync }}" = "true" ]; then
+            DS_ROW="✅ 槽位 $DS_SLOT + NTSync"
+          else
+            DS_ROW="✅ 槽位 $DS_SLOT"
+          fi
+
+          if [ "${{ inputs.use_kpm }}" != "true" ]; then
+            KPM_ROW="➖ 关闭"
+          elif [ "$VARIANT" = "FinaSU" ]; then
+            KPM_ROW="⚠️ 已选，FinaSU 不支持（将忽略）"
+          else
+            KPM_ROW="✅ 启用"
+          fi
+
+          VER_ROW="${{ inputs.version }}"
+          [ -n "$VER_ROW" ] || VER_ROW="默认"
+          TIME_ROW="${{ inputs.build_time }}"
+          [ -n "$TIME_ROW" ] || TIME_ROW="自动（当前北京时间）"
+
           {
-            echo "### 构建通道"
+            echo "## 📊 构建总结"
             echo ""
-            echo "- 选择通道：${{ inputs.build_channel }}"
-            echo "- 实际通道：${CHANNEL_KIND:-未知}（pin_mode=${PIN_MODE:-未知}）"
-            echo "- 管理器来源：${MANAGER_SOURCE:-ci}"
-            if [ "${MANAGER_SOURCE:-ci}" = "release" ]; then
-              echo "- Release 标签：${REL_TAG:-未知}"
-              echo "- 内核对齐提交：${REL_COMMIT:0:8}"
-            elif [ "${CHANNEL_KIND:-}" = "latest" ]; then
-              echo "- 内核锁定：上游默认分支 HEAD ${HEAD_SHA:0:8}（管理器按该版本匹配）"
+            if [ "${{ inputs.ksu_mode }}" = "禁用KSU" ]; then
+              echo "**未集成 KernelSU** · $CH_LABEL"
             else
-              echo "- 内核锁定：官方默认分支最新上传构建${MANAGER_HEAD_SHA:+ }${MANAGER_HEAD_SHA:0:8}"
+              echo "**$VARIANT** · 管理器 \`$MANAGER_VER\` · $CH_LABEL"
             fi
-            echo "- 管理器版本：${{ steps.add_KSU.outputs.managerVer }}"
+            echo ""
+            echo "### ⚙️ 构建选项"
+            echo ""
+            echo "| 功能 | 选择 |"
+            echo "|:---|:---|"
+            echo "| SUSFS | $SUS_ROW |"
+            echo "| Droidspaces 容器 | $DS_ROW |"
+            echo "| ZRAM 压缩 | $(flag "${{ inputs.use_zram }}") |"
+            echo "| BBG 基带保护 | $(flag "${{ inputs.use_bbg }}") |"
+            echo "| 网络增强 | $(flag "${{ inputs.use_net_enhance }}") |"
+            echo "| Re-Kernel 驱动 | $(flag "${{ inputs.use_rekernel }}") |"
+            echo "| KPM | $KPM_ROW |"
+            echo "| NoMount 元模块 | $(flag "${{ inputs.use_nomount }}") |"
+            echo "| \`CVE-2026-43499\` 修复 | $(flag "${{ inputs.cve_2026_43499_patch }}") |"
+            echo "| 兼容跳过 | $(flag "${{ inputs.skip_incompatible }}") |"
+            echo "| 产物上传模式 | ${{ inputs.artifact_upload_mode }} |"
+            echo "| 自定义内核版本名 | ${VER_ROW} |"
+            echo "| 自定义构建时间 | ${TIME_ROW} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: 上传APK
@@ -738,4 +957,11 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: susfs-${{ env.SUSFS_NAME }}
-          path: ./susfs-module/*
+          path: ./susfs-module/
+
+      - name: 上传NoMount模块
+        if: inputs.use_nomount && steps.add_nomount.outcome == 'success'
+        uses: actions/upload-artifact@v6
+        with:
+          name: nomount-${{ env.NOMOUNT_NAME }}
+          path: ./nomount-module/
