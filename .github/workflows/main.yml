@@ -942,8 +942,7 @@ jobs:
           | KernelSU 分支 | $BRANCH_INFO |
           | SUSFS | $SUS_VER |
           | Hook 类型 | $HOOK_TYPE |
-          $(if [ -n "$MOUNT_TYPE" ]; then echo "| 挂载方式 | $MOUNT_TYPE |"; fi)
-          | LTO | thin |
+          $( if [ -n "$MOUNT_TYPE" ]; then echo "| 挂载方式 | $MOUNT_TYPE |"; echo "| LTO | thin |"; else echo "| LTO | thin |"; fi )
           | ZRAM / LZ4KD | $LZ4_STATUS |
           | BBG 基带保护 | $BBG_STATUS |
           | 网络增强 (BBRv3 / IPSet / Qdisc / CIFS) | $NET_ENHANCE_STATUS |
