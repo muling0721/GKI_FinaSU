@@ -612,10 +612,14 @@ jobs:
           # Hook 类型
           echo "HOOK_TYPE=SUSFS Inline Hooks" >> $GITHUB_ENV
 
-          # 挂载方式：只有启用 NoMount 时发布模板才写该字段，否则整行不显示
+          # 挂载方式：仅启用 NoMount 时展示，并带上模块版本（module.prop version）
           MOUNT_TYPE=""
+          NOMOUNT_VER="${{ needs.get-manager.outputs.nomountVer }}"
           if [ "${{ inputs.use_nomount }}" == "true" ]; then
             MOUNT_TYPE="NoMount"
+            if [ -n "$NOMOUNT_VER" ]; then
+              MOUNT_TYPE="NoMount $NOMOUNT_VER"
+            fi
           fi
           echo "MOUNT_TYPE=$MOUNT_TYPE" >> $GITHUB_ENV
 
