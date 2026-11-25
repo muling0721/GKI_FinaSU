@@ -100,6 +100,10 @@ on:
         description: "FinaSU 管理器签名证书 SHA256（内核第二信任槽对齐用）"
         value: ${{ jobs.get_ksu_manager.outputs.managerCertHash }}
 
+      nomountVer:
+        description: "NoMount 元模块版本（use_nomount=true 时由 module.prop 读取）"
+        value: ${{ jobs.get_ksu_manager.outputs.nomountVer }}
+
 jobs:
   get_ksu_manager:
     runs-on: ubuntu-24.04
@@ -115,6 +119,8 @@ jobs:
       # 输出5/6: FinaSU 管理器签名证书（内核第二信任槽对齐用）
       managerCertSize: ${{ steps.add_KSU.outputs.managerCertSize }}
       managerCertHash: ${{ steps.add_KSU.outputs.managerCertHash }}
+      # 输出7: NoMount 元模块版本（use_nomount=true 时）
+      nomountVer: ${{ steps.add_nomount.outputs.nomountVer }}
     env:
       CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
       CCACHE_NOHASHDIR: "true"
@@ -864,6 +870,18 @@ jobs:
           unzip -oq "$ASSET_NAME" -d nomount-module
           rm -f "$ASSET_NAME"
           [ -f nomount-module/module.prop ] || { echo "NoMount 模块缺少 module.prop"; exit 1; }
+          NOMOUNT_VER=$(awk '
+            index($0, "version=") == 1 {
+              v = substr($0, length("version=") + 1)
+              gsub(/\r/, "", v)
+              gsub(/^[ \t]+|[ \t]+$/, "", v)
+              print v
+              exit
+            }
+          ' nomount-module/module.prop)
+          [ -n "$NOMOUNT_VER" ] || NOMOUNT_VER="$TAG_NAME"
+          echo "NoMount 模块版本: $NOMOUNT_VER"
+          echo "nomountVer=$NOMOUNT_VER" >> "$GITHUB_OUTPUT"
           ls -la nomount-module/
 
       - name: Notify on failure
