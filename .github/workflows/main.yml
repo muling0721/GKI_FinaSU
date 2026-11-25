@@ -612,12 +612,12 @@ jobs:
           # Hook 类型
           echo "HOOK_TYPE=SUSFS Inline Hooks" >> $GITHUB_ENV
 
-          # Mount 类型（FinaSU 使用 metamodule 模块架构）
-          if [ "${{ inputs.kernelsu_variant }}" == "FinaSU" ]; then
-            echo "MOUNT_TYPE=Metamodule" >> $GITHUB_ENV
-          else
-            echo "MOUNT_TYPE=Magic Mount" >> $GITHUB_ENV
+          # 挂载方式：只有启用 NoMount 时发布模板才写该字段，否则整行不显示
+          MOUNT_TYPE=""
+          if [ "${{ inputs.use_nomount }}" == "true" ]; then
+            MOUNT_TYPE="NoMount"
           fi
+          echo "MOUNT_TYPE=$MOUNT_TYPE" >> $GITHUB_ENV
 
           echo "CHANNEL_TAG=${{ needs.get-manager.outputs.channelTag }}" >> $GITHUB_ENV
           echo "CHANNEL_NAME=${{ inputs.build_channel }}" >> $GITHUB_ENV
@@ -633,7 +633,6 @@ jobs:
               echo "KSU_VER=-" >> $GITHUB_ENV
               echo "SUS_VER=未集成" >> $GITHUB_ENV
               echo "HOOK_TYPE=无" >> $GITHUB_ENV
-              echo "MOUNT_TYPE=无" >> $GITHUB_ENV
               echo "BRANCH_INFO=-" >> $GITHUB_ENV
               echo "RELEASE_NAME=GKI Kernel: 纯净版（无 KernelSU / SUSFS）" >> $GITHUB_ENV
               echo "RELEASE_HEADER=**纯净 GKI 内核**（未集成 KernelSU / SUSFS）" >> $GITHUB_ENV
@@ -943,7 +942,7 @@ jobs:
           | KernelSU 分支 | $BRANCH_INFO |
           | SUSFS | $SUS_VER |
           | Hook 类型 | $HOOK_TYPE |
-          | 挂载方式 | $MOUNT_TYPE |
+          $(if [ -n "$MOUNT_TYPE" ]; then echo "| 挂载方式 | $MOUNT_TYPE |"; fi)
           | LTO | thin |
           | ZRAM / LZ4KD | $LZ4_STATUS |
           | BBG 基带保护 | $BBG_STATUS |
