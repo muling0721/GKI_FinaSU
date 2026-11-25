@@ -969,7 +969,7 @@ jobs:
           | \`*-AnyKernel3.zip\` | AnyKernel3 内核刷入包 |
           | \`*.img\` | boot、vendor_boot 等镜像文件 |
           | \`*.apk\` | Root 管理器 |
-          | \`susfs-*.zip\` | SUSFS 配套模块 |
+          | \`susfs-*.zip\` | SUSFS 配套模块 |$( if [ -n "$MOUNT_TYPE" ]; then printf '\n| `nomount-*.zip` | NoMount 配套元模块 |'; fi )
 
           > [!IMPORTANT]
           > 刷入前请备份原厂 Boot 镜像。
